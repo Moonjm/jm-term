@@ -41,9 +41,8 @@ final class StatsMonitor {
 
     func start(client: SSHClient) {
         let clientBox = UncheckedSendableBox(value: client)
-        let monitorBox = UncheckedSendableBox<StatsMonitor>(value: self)
 
-        statsTask = Task.detached {
+        statsTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
                     let cmd = """
@@ -54,9 +53,7 @@ final class StatsMonitor {
                     """
                     let output = try await clientBox.value.executeCommand(cmd)
                     let text = String(buffer: output)
-                    await MainActor.run {
-                        monitorBox.value.parseStats(text)
-                    }
+                    self?.parseStats(text)
                 } catch {
                     // 명령 실패 시 무시하고 다음 폴링 대기
                 }

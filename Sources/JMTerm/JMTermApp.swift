@@ -149,7 +149,7 @@ struct ContentView: View {
             EditConnectionView(connectionStore: coordinator.connectionStore, connection: conn)
         }
         .sheet(item: $coordinator.hostKeyPrompt, onDismiss: {
-            if !coordinator.hostKeyQueue.isEmpty {
+            if coordinator.hasQueuedPrompts {
                 coordinator.resolveHostKeyPrompt(result: .reject)
             }
         }) { prompt in

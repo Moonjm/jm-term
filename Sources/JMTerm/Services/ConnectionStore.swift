@@ -67,6 +67,7 @@ final class ConnectionStore {
     }
 
     private func load() {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         do {
             let data = try Data(contentsOf: fileURL)
             connections = try JSONDecoder().decode([ServerConnection].self, from: data)
