@@ -14,6 +14,8 @@ final class SFTPViewModel {
     var editingPath: String = ""
     var selectedID: FileNode.ID?
     var isDropTargeted = false
+    var renamingNode: FileNode?
+    var renamingName: String = ""
 
     private var trackedPath: String = ""
     private var lastClickID: FileNode.ID?
@@ -90,6 +92,50 @@ final class SFTPViewModel {
         let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
         let command = "cd '\(escaped)'\n"
         session.sendToShell(Data(command.utf8))
+    }
+
+    func beginRename(_ node: FileNode) {
+        renamingNode = node
+        renamingName = node.name
+    }
+
+    func commitRename() {
+        guard let node = renamingNode else { return }
+        let newName = renamingName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty, newName != node.name else {
+            renamingNode = nil
+            return
+        }
+        let parentPath = (node.path as NSString).deletingLastPathComponent
+        let newPath = parentPath == "/" ? "/\(newName)" : "\(parentPath)/\(newName)"
+        renamingNode = nil
+        Task {
+            do {
+                try await session.sftpService.renameItem(oldPath: node.path, newPath: newPath)
+                await loadDirectory()
+            } catch {
+                errorMessage = "이름 변경 실패: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func cancelRename() {
+        renamingNode = nil
+    }
+
+    func deleteNode(_ node: FileNode) {
+        Task {
+            do {
+                if node.isDirectory {
+                    try await session.sftpService.deleteDirectory(at: node.path)
+                } else {
+                    try await session.sftpService.deleteFile(at: node.path)
+                }
+                await loadDirectory()
+            } catch {
+                errorMessage = "삭제 실패: \(error.localizedDescription)"
+            }
+        }
     }
 
     func dragProvider(for node: FileNode) -> NSItemProvider {
