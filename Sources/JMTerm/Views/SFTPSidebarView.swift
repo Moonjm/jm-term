@@ -233,6 +233,7 @@ final class FileContextMenuView: NSView, @unchecked Sendable {
     }
 
     private func showContextMenu(with event: NSEvent) {
+        guard let node = self.node, let viewModel = self.viewModel else { return }
         viewModel.selectedID = node.id
 
         guard node.name != ".." else { return }
@@ -240,26 +241,26 @@ final class FileContextMenuView: NSView, @unchecked Sendable {
         let menu = NSMenu()
 
         if node.isDirectory {
-            menu.addItem(ClosureMenuItem(title: "열기") { [node, viewModel] in
-                viewModel?.navigateTo(node!.path)
+            menu.addItem(ClosureMenuItem(title: "열기") {
+                viewModel.navigateTo(node.path)
             })
-            menu.addItem(ClosureMenuItem(title: "터미널에서 이동") { [node, viewModel] in
-                viewModel?.cdInTerminal(node!.path)
+            menu.addItem(ClosureMenuItem(title: "터미널에서 이동") {
+                viewModel.cdInTerminal(node.path)
             })
         } else {
-            menu.addItem(ClosureMenuItem(title: "다운로드") { [node, viewModel] in
-                viewModel?.downloadNode(node!)
+            menu.addItem(ClosureMenuItem(title: "다운로드") {
+                viewModel.downloadNode(node)
             })
         }
 
         menu.addItem(.separator())
 
-        menu.addItem(ClosureMenuItem(title: "이름 변경") { [node, viewModel] in
-            viewModel?.beginRename(node!)
+        menu.addItem(ClosureMenuItem(title: "이름 변경") {
+            viewModel.beginRename(node)
         })
 
-        let deleteItem = ClosureMenuItem(title: "삭제") { [node, viewModel] in
-            viewModel?.deleteNode(node!)
+        let deleteItem = ClosureMenuItem(title: "삭제") {
+            viewModel.deleteNode(node)
         }
         deleteItem.attributedTitle = NSAttributedString(
             string: "삭제",
