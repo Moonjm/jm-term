@@ -54,7 +54,11 @@ struct ConnectionDialogView: View {
         if saveConnection {
             connectionStore.add(connection)
             if !useKey && !password.isEmpty {
-                try? connectionStore.savePassword(password, for: connection)
+                do {
+                    try connectionStore.savePassword(password, for: connection)
+                } catch {
+                    print("[ConnectionDialog] 패스워드 저장 에러: \(error)")
+                }
             }
         }
 

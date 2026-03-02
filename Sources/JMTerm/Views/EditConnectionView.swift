@@ -66,7 +66,11 @@ struct EditConnectionView: View {
         connectionStore.update(updated)
 
         if !useKey && !password.isEmpty {
-            try? connectionStore.savePassword(password, for: updated)
+            do {
+                try connectionStore.savePassword(password, for: updated)
+            } catch {
+                print("[EditConnection] 패스워드 저장 에러: \(error)")
+            }
         }
 
         dismiss()
