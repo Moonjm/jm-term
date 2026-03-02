@@ -1,6 +1,7 @@
 // Sources/JMTerm/Services/ConnectionStore.swift
 import Foundation
 import SwiftUI
+import OSLog
 
 @MainActor
 @Observable
@@ -62,7 +63,7 @@ final class ConnectionStore {
             let data = try JSONEncoder().encode(connections)
             try data.write(to: fileURL, options: .atomic)
         } catch {
-            print("[ConnectionStore] save 에러: \(error)")
+            Logger.app.error("[ConnectionStore] save 에러: \(error)")
         }
     }
 
@@ -72,7 +73,7 @@ final class ConnectionStore {
             let data = try Data(contentsOf: fileURL)
             connections = try JSONDecoder().decode([ServerConnection].self, from: data)
         } catch {
-            print("[ConnectionStore] load 에러: \(error)")
+            Logger.app.error("[ConnectionStore] load 에러: \(error)")
         }
     }
 }

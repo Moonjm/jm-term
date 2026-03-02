@@ -1,6 +1,7 @@
 // Sources/JMTerm/JMTermApp.swift
 import SwiftUI
 import AppKit
+import OSLog
 
 @main
 struct JMTermApp: App {
@@ -131,7 +132,7 @@ struct ContentView: View {
                     do {
                         try coordinator.connectionStore.savePassword(password, for: conn)
                     } catch {
-                        print("[PasswordPrompt] 패스워드 저장 에러: \(error)")
+                        Logger.app.error("[PasswordPrompt] 패스워드 저장 에러: \(error)")
                     }
                     coordinator.startSession(conn, password: password)
                 }

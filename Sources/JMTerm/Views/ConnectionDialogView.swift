@@ -1,5 +1,6 @@
 // Sources/JMTerm/Views/ConnectionDialogView.swift
 import SwiftUI
+import OSLog
 
 struct ConnectionDialogView: View {
     @Environment(\.dismiss) private var dismiss
@@ -57,7 +58,7 @@ struct ConnectionDialogView: View {
                 do {
                     try connectionStore.savePassword(password, for: connection)
                 } catch {
-                    print("[ConnectionDialog] 패스워드 저장 에러: \(error)")
+                    Logger.app.error("[ConnectionDialog] 패스워드 저장 에러: \(error)")
                 }
             }
         }
