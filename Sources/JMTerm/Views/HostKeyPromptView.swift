@@ -14,11 +14,17 @@ enum HostKeyPromptType: Identifiable {
     }
 }
 
+/// Result of user's host key prompt decision.
+enum HostKeyPromptResult {
+    case reject
+    case acceptOnce      // Connect without saving (mismatch only)
+    case acceptAndSave   // Save to known_hosts (unknown) or update (mismatch)
+}
+
 struct HostKeyPromptView: View {
     @Environment(\.dismiss) private var dismiss
     let promptType: HostKeyPromptType
-    var onAccept: () -> Void
-    var onReject: () -> Void
+    var onResult: (HostKeyPromptResult) -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -51,13 +57,13 @@ struct HostKeyPromptView: View {
 
         HStack {
             Button("취소") {
-                onReject()
+                onResult(.reject)
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
 
             Button("신뢰 및 저장") {
-                onAccept()
+                onResult(.acceptAndSave)
                 dismiss()
             }
             .keyboardShortcut(.defaultAction)
@@ -89,18 +95,18 @@ struct HostKeyPromptView: View {
             fingerprintLabel(newFingerprint)
         }
 
-        HStack {
+        HStack(spacing: 12) {
             Button("연결 거부") {
-                onReject()
+                onResult(.reject)
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
 
-            Button("무시하고 연결") {
-                onAccept()
+            Button("새 키로 업데이트") {
+                onResult(.acceptAndSave)
                 dismiss()
             }
-            .foregroundStyle(.red)
+            .keyboardShortcut(.defaultAction)
         }
     }
 
