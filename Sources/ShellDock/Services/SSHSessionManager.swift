@@ -15,14 +15,27 @@ private struct UncheckedSendableBox<T>: @unchecked Sendable {
     let value: T
 }
 
+struct ServerStats {
+    var cpuUsage: Double = 0       // %
+    var memTotal: UInt64 = 0       // KB
+    var memUsed: UInt64 = 0        // KB
+    var diskTotal: String = ""     // "96G"
+    var diskUsed: String = ""      // "48G"
+    var diskPercent: String = ""   // "50%"
+    var netRxSpeed: UInt64 = 0     // bytes/sec
+    var netTxSpeed: UInt64 = 0     // bytes/sec
+}
+
 @MainActor
 @Observable
 final class SSHSession: Identifiable {
     let id = UUID()
     let connection: ServerConnection
     var isConnected = false
+    var isSFTPReady = false
     var statusMessage = "연결 대기 중"
     var currentPath = "/"
+    var stats: ServerStats?
 
     // These properties hold non-Sendable types from Citadel.
     // They are only accessed on @MainActor. We use UncheckedSendableBox
@@ -31,6 +44,10 @@ final class SSHSession: Identifiable {
     private var sftpClient: SFTPClient?
     private var stdinWriter: TTYStdinWriter?
     weak var terminalView: TerminalView?
+
+    private var statsTask: Task<Void, Never>?
+    private var prevCPU: (idle: UInt64, total: UInt64)?
+    private var prevNet: (rx: UInt64, tx: UInt64, time: Date)?
 
     init(connection: ServerConnection) {
         self.connection = connection
@@ -45,20 +62,35 @@ final class SSHSession: Identifiable {
             guard let password else { throw SSHSessionError.passwordRequired }
             authMethod = .passwordBased(username: connection.username, password: password)
         case .publicKey(let path):
-            let keyString = try String(contentsOfFile: path, encoding: .utf8)
+            let expandedPath = NSString(string: path).expandingTildeInPath
+            let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
             authMethod = try SSHKeyHelper.authenticationMethod(
                 fromPrivateKey: keyString,
                 username: connection.username
             )
         }
 
-        let sshClient = try await SSHClient.connect(
-            host: connection.host,
-            port: connection.port,
-            authenticationMethod: authMethod,
-            hostKeyValidator: .acceptAnything(),
-            reconnect: .never
-        )
+        var sshClient: SSHClient?
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                sshClient = try await SSHClient.connect(
+                    host: connection.host,
+                    port: connection.port,
+                    authenticationMethod: authMethod,
+                    hostKeyValidator: .acceptAnything(),
+                    reconnect: .never
+                )
+                break
+            } catch {
+                lastError = error
+                if attempt < 3 {
+                    statusMessage = "연결 재시도 중... (\(attempt)/3)"
+                    try await Task.sleep(for: .milliseconds(500))
+                }
+            }
+        }
+        guard let sshClient else { throw lastError! }
 
         self.client = sshClient
         isConnected = true
@@ -68,6 +100,25 @@ final class SSHSession: Identifiable {
     func startShell() async throws {
         guard let client else { return }
         guard let terminalView else { return }
+
+        // SFTP 준비 대기 후 MOTD 읽어서 셸 시작 전에 표시
+        for _ in 0..<20 {
+            if sftpClient != nil { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        if let sftp = sftpClient {
+            var motdText = ""
+            if let buf = try? await sftp.withFile(filePath: "/run/motd.dynamic", flags: .read, { try await $0.readAll() }) {
+                motdText += String(buffer: buf)
+            }
+            if let buf = try? await sftp.withFile(filePath: "/etc/motd", flags: .read, { try await $0.readAll() }) {
+                motdText += String(buffer: buf)
+            }
+            if !motdText.isEmpty {
+                let display = motdText.replacingOccurrences(of: "\n", with: "\r\n")
+                terminalView.feed(byteArray: Array(display.utf8)[...])
+            }
+        }
 
         let terminal = terminalView.getTerminal()
         let cols = terminal.cols
@@ -80,49 +131,49 @@ final class SSHSession: Identifiable {
             terminalRowHeight: rows,
             terminalPixelWidth: 0,
             terminalPixelHeight: 0,
-            terminalModes: SSHTerminalModes([.ECHO: 1])
+            terminalModes: SSHTerminalModes([.ECHO: 0])
         )
 
-        // Wrap non-Sendable values for crossing isolation boundary
         let clientBox = UncheckedSendableBox(value: client)
         let termViewBox = UncheckedSendableBox(value: terminalView)
         let sessionBox = UncheckedSendableBox<SSHSession>(value: self)
 
-        try await SSHSession.runPTYSession(
-            client: clientBox,
-            ptyRequest: ptyRequest,
-            session: sessionBox,
-            termView: termViewBox
-        )
-    }
-
-    /// Runs the PTY session in a nonisolated context to satisfy Swift 6 concurrency.
-    /// The closure passed to `withPTY` must not be main-actor-isolated.
-    private nonisolated static func runPTYSession(
-        client: UncheckedSendableBox<SSHClient>,
-        ptyRequest: SSHChannelRequestEvent.PseudoTerminalRequest,
-        session: UncheckedSendableBox<SSHSession>,
-        termView: UncheckedSendableBox<TerminalView>
-    ) async throws {
-        try await client.value.withPTY(ptyRequest) { inbound, outbound in
-            let writerBox = UncheckedSendableBox(value: outbound)
-            await MainActor.run {
-                session.value.stdinWriter = writerBox.value
-            }
-
-            for try await event in inbound {
-                switch event {
-                case .stdout(let buffer), .stderr(let buffer):
-                    let bytes = Array(buffer.readableBytesView)
+        // 별도 스레드에서 PTY 세션 실행 (메인스레드 블로킹 방지)
+        Task.detached {
+            do {
+                try await clientBox.value.withPTY(ptyRequest) { inbound, outbound in
+                    let writerBox = UncheckedSendableBox(value: outbound)
                     await MainActor.run {
-                        termView.value.feed(byteArray: bytes[...])
+                        sessionBox.value.stdinWriter = writerBox.value
+                    }
+
+                    // PS1에 OSC 7 추가 + echo 복원 (ECHO:0이라 명령 안 보임)
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        let setupCmd = #" PS1='\[\e]7;file://\H$(pwd)\a\]'"$PS1"; stty echo; printf '\033[1A\033[2K'"# + "\n"
+                        try? await writerBox.value.write(ByteBuffer(data: Data(setupCmd.utf8)))
+                    }
+
+                    for try await event in inbound {
+                        switch event {
+                        case .stdout(let buffer), .stderr(let buffer):
+                            let bytes = Array(buffer.readableBytesView)
+                            await MainActor.run {
+                                termViewBox.value.feed(byteArray: bytes[...])
+                            }
+                        }
+                    }
+
+                    await MainActor.run {
+                        sessionBox.value.isConnected = false
+                        sessionBox.value.statusMessage = "연결 종료됨"
+                        NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
                     }
                 }
-            }
-
-            await MainActor.run {
-                session.value.isConnected = false
-                session.value.statusMessage = "연결 종료됨"
+            } catch {
+                await MainActor.run {
+                    sessionBox.value.statusMessage = "셸 오류: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -155,6 +206,7 @@ final class SSHSession: Identifiable {
         let sftp = try await clientBox.value.openSFTP()
         sftpClient = sftp
         currentPath = try await sftp.getRealPath(atPath: ".")
+        isSFTPReady = true
     }
 
     func listDirectory(at path: String) async throws -> [FileNode] {
@@ -197,6 +249,7 @@ final class SSHSession: Identifiable {
     }
 
     func disconnect() async {
+        stopStatsMonitor()
         if let sftp = sftpClient {
             try? await sftp.close()
         }
@@ -209,7 +262,112 @@ final class SSHSession: Identifiable {
         stdinWriter = nil
         isConnected = false
         statusMessage = "연결 끊김"
+        stats = nil
     }
+
+    // MARK: - Server Stats Monitoring
+
+    func startStatsMonitor() {
+        guard let client else { return }
+        let clientBox = UncheckedSendableBox(value: client)
+        let sessionBox = UncheckedSendableBox<SSHSession>(value: self)
+
+        statsTask = Task.detached {
+            while !Task.isCancelled {
+                do {
+                    let cmd = """
+                    head -1 /proc/stat; \
+                    awk '/MemTotal/{printf "MEMTOTAL %d\\n",$2}/MemAvailable/{printf "MEMAVAIL %d\\n",$2}' /proc/meminfo; \
+                    df -h / | awk 'NR==2{printf "DISK %s %s %s\\n",$2,$3,$5}'; \
+                    awk 'NR>2{rx+=$2;tx+=$10}END{printf "NET %d %d\\n",rx,tx}' /proc/net/dev
+                    """
+                    let output = try await clientBox.value.executeCommand(cmd)
+                    let text = String(buffer: output)
+                    await MainActor.run {
+                        sessionBox.value.parseStats(text)
+                    }
+                } catch {
+                    // 명령 실패 시 무시하고 다음 폴링 대기
+                }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    func stopStatsMonitor() {
+        statsTask?.cancel()
+        statsTask = nil
+    }
+
+    private func parseStats(_ output: String) {
+        let lines = output.components(separatedBy: "\n")
+        var newStats = ServerStats()
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // CPU: "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
+            if trimmed.hasPrefix("cpu ") {
+                let parts = trimmed.split(separator: " ").dropFirst() // drop "cpu"
+                let values = parts.compactMap { UInt64($0) }
+                if values.count >= 4 {
+                    let idle = values[3]
+                    let total = values.reduce(0, +)
+                    if let prev = prevCPU {
+                        let totalDelta = total - prev.total
+                        let idleDelta = idle - prev.idle
+                        if totalDelta > 0 {
+                            newStats.cpuUsage = Double(totalDelta - idleDelta) / Double(totalDelta) * 100
+                        }
+                    }
+                    prevCPU = (idle: idle, total: total)
+                }
+            }
+
+            if trimmed.hasPrefix("MEMTOTAL ") {
+                let val = trimmed.replacingOccurrences(of: "MEMTOTAL ", with: "")
+                newStats.memTotal = UInt64(val) ?? 0
+            }
+
+            if trimmed.hasPrefix("MEMAVAIL ") {
+                let val = trimmed.replacingOccurrences(of: "MEMAVAIL ", with: "")
+                let avail = UInt64(val) ?? 0
+                newStats.memUsed = newStats.memTotal > avail ? newStats.memTotal - avail : 0
+            }
+
+            if trimmed.hasPrefix("DISK ") {
+                let parts = trimmed.split(separator: " ")
+                if parts.count >= 4 {
+                    newStats.diskTotal = String(parts[1])
+                    newStats.diskUsed = String(parts[2])
+                    newStats.diskPercent = String(parts[3])
+                }
+            }
+
+            if trimmed.hasPrefix("NET ") {
+                let parts = trimmed.split(separator: " ")
+                if parts.count >= 3 {
+                    let rx = UInt64(parts[1]) ?? 0
+                    let tx = UInt64(parts[2]) ?? 0
+                    let now = Date()
+                    if let prev = prevNet {
+                        let elapsed = now.timeIntervalSince(prev.time)
+                        if elapsed > 0 {
+                            newStats.netRxSpeed = UInt64(Double(rx - prev.rx) / elapsed)
+                            newStats.netTxSpeed = UInt64(Double(tx - prev.tx) / elapsed)
+                        }
+                    }
+                    prevNet = (rx: rx, tx: tx, time: now)
+                }
+            }
+        }
+
+        stats = newStats
+    }
+}
+
+extension Notification.Name {
+    static let sshSessionEnded = Notification.Name("sshSessionEnded")
 }
 
 // MARK: - Errors
