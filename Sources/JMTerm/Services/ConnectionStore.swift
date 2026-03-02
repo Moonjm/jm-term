@@ -33,6 +33,15 @@ final class ConnectionStore {
 
     func update(_ connection: ServerConnection) {
         if let index = connections.firstIndex(where: { $0.id == connection.id }) {
+            let old = connections[index]
+            let oldAccount = "\(old.username)@\(old.host):\(old.port)"
+            let newAccount = "\(connection.username)@\(connection.host):\(connection.port)"
+
+            // Clean up old keychain entry if account changed or switched to key auth
+            if oldAccount != newAccount || connection.authMethod != .password {
+                try? KeychainManager.delete(for: oldAccount)
+            }
+
             connections[index] = connection
             save()
         }
