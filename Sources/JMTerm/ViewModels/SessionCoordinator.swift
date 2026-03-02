@@ -15,7 +15,9 @@ final class SessionCoordinator {
     var selectedConnectionID: ServerConnection.ID?
     var sidebarTab: SidebarTab = .servers
     var hostKeyPrompt: HostKeyPromptType?
-    var hostKeyQueue: [(promptType: HostKeyPromptType, continuation: CheckedContinuation<HostKeyPromptResult, Never>)] = []
+    private var hostKeyQueue: [(promptType: HostKeyPromptType, continuation: CheckedContinuation<HostKeyPromptResult, Never>)] = []
+
+    var hasQueuedPrompts: Bool { !hostKeyQueue.isEmpty }
 
     private var lastClickID: ServerConnection.ID?
     private var lastClickDate = Date.distantPast
@@ -76,7 +78,7 @@ final class SessionCoordinator {
         Task {
             do {
                 try await session.connect(password: password)
-                session.statsMonitor.start(client: session.client!)
+                session.startMonitoring()
                 do {
                     try await session.openSFTP()
                 } catch {

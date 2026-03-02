@@ -23,6 +23,7 @@ final class SFTPService {
 
     func readMOTD(terminalView: TerminalView) async {
         guard let sftp = sftpClient else { return }
+        // MOTD 파일은 시스템에 따라 없을 수 있으므로 try?로 무시
         var motdText = ""
         if let buf = try? await sftp.withFile(filePath: "/run/motd.dynamic", flags: .read, { try await $0.readAll() }) {
             motdText += String(buffer: buf)
@@ -60,7 +61,7 @@ final class SFTPService {
     }
 
     func downloadFile(remotePath: String, localURL: URL) async throws {
-        guard let sftp = sftpClient else { return }
+        guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
         try await sftp.withFile(filePath: remotePath, flags: .read) { file in
             let attrs = try await file.readAttributes()
             let fileSize = attrs.size ?? 0
@@ -81,7 +82,7 @@ final class SFTPService {
     }
 
     func uploadFile(localURL: URL, remotePath: String) async throws {
-        guard let sftp = sftpClient else { return }
+        guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
         let handle = try FileHandle(forReadingFrom: localURL)
         defer { handle.closeFile() }
 

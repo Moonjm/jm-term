@@ -40,7 +40,7 @@ final class SSHSession: Identifiable {
     // These properties hold non-Sendable types from Citadel.
     // They are only accessed on @MainActor. We use UncheckedSendableBox
     // when passing them to nonisolated Citadel async methods.
-    private(set) var client: SSHClient?
+    private var client: SSHClient?
     private var stdinWriter: TTYStdinWriter?
     weak var terminalView: TerminalView?
 
@@ -198,7 +198,12 @@ final class SSHSession: Identifiable {
         }
     }
 
-    // MARK: - SFTP
+    // MARK: - Monitoring & SFTP
+
+    func startMonitoring() {
+        guard let client else { return }
+        statsMonitor.start(client: client)
+    }
 
     func openSFTP() async throws {
         guard let client else { return }
