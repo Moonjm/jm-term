@@ -38,7 +38,7 @@ struct ContentView: View {
     @State private var lastClickDate = Date.distantPast
     @State private var sidebarTab: SidebarTab = .servers
     @State private var hostKeyPrompt: HostKeyPromptType?
-    @State private var hostKeyQueue: [(promptType: HostKeyPromptType, continuation: CheckedContinuation<Bool, Never>)] = []
+    @State private var hostKeyQueue: [(promptType: HostKeyPromptType, continuation: CheckedContinuation<HostKeyPromptResult, Never>)] = []
 
     private var activeSession: SSHSession? {
         sessions.first { $0.id == activeSessionID }
@@ -164,15 +164,12 @@ struct ContentView: View {
             EditConnectionView(connectionStore: connectionStore, connection: conn)
         }
         .sheet(item: $hostKeyPrompt, onDismiss: {
-            // Esc 등으로 시트가 닫힐 때 대기 중인 continuation이 멈추지 않도록 처리
             if !hostKeyQueue.isEmpty {
-                resolveHostKeyPrompt(accepted: false)
+                resolveHostKeyPrompt(result: .reject)
             }
         }) { prompt in
-            HostKeyPromptView(promptType: prompt) {
-                resolveHostKeyPrompt(accepted: true)
-            } onReject: {
-                resolveHostKeyPrompt(accepted: false)
+            HostKeyPromptView(promptType: prompt) { result in
+                resolveHostKeyPrompt(result: result)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -318,11 +315,10 @@ struct ContentView: View {
         hostKeyPrompt = hostKeyQueue.first?.promptType
     }
 
-    private func resolveHostKeyPrompt(accepted: Bool) {
+    private func resolveHostKeyPrompt(result: HostKeyPromptResult) {
         guard !hostKeyQueue.isEmpty else { return }
         let entry = hostKeyQueue.removeFirst()
-        entry.continuation.resume(returning: accepted)
-        // Show next queued prompt after a short delay for sheet dismissal
+        entry.continuation.resume(returning: result)
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             showNextHostKeyPrompt()

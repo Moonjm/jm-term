@@ -27,8 +27,7 @@ struct ServerStats {
 }
 
 /// Callback type for host key verification UI.
-/// Returns `true` if user accepts the key, `false` to reject.
-typealias HostKeyPromptHandler = @MainActor (HostKeyPromptType) async -> Bool
+typealias HostKeyPromptHandler = @MainActor (HostKeyPromptType) async -> HostKeyPromptResult
 
 @MainActor
 @Observable
@@ -254,19 +253,42 @@ final class SSHSession: Identifiable {
         }
     }
 
+    nonisolated private static let chunkSize: UInt32 = 1024 * 1024 // 1MB chunks
+
     func downloadFile(remotePath: String, localURL: URL) async throws {
         guard let sftp = sftpClient else { return }
-        let data = try await sftp.withFile(filePath: remotePath, flags: .read) { file in
-            try await file.readAll()
+        try await sftp.withFile(filePath: remotePath, flags: .read) { file in
+            let attrs = try await file.readAttributes()
+            let fileSize = attrs.size ?? 0
+
+            FileManager.default.createFile(atPath: localURL.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: localURL)
+            defer { handle.closeFile() }
+
+            var offset: UInt64 = 0
+            while offset < fileSize {
+                let chunk = try await file.read(from: offset, length: SSHSession.chunkSize)
+                let data = Data(buffer: chunk)
+                handle.write(data)
+                offset += UInt64(data.count)
+                if data.isEmpty { break }
+            }
         }
-        try Data(buffer: data).write(to: localURL)
     }
 
     func uploadFile(localURL: URL, remotePath: String) async throws {
         guard let sftp = sftpClient else { return }
-        let data = try Data(contentsOf: localURL)
+        let handle = try FileHandle(forReadingFrom: localURL)
+        defer { handle.closeFile() }
+
         try await sftp.withFile(filePath: remotePath, flags: [.write, .create, .truncate]) { file in
-            try await file.write(ByteBuffer(data: data))
+            var offset: UInt64 = 0
+            while true {
+                let data = handle.readData(ofLength: Int(SSHSession.chunkSize))
+                if data.isEmpty { break }
+                try await file.write(ByteBuffer(data: data), at: offset)
+                offset += UInt64(data.count)
+            }
         }
     }
 
@@ -441,14 +463,21 @@ private final class HostKeyValidationDelegate: NIOSSHClientServerAuthenticationD
                 return
             }
 
-            let accepted = await promptHandler(promptType)
-            if accepted {
-                if isUnknown, let savedKey = try? NIOSSHPublicKey(openSSHPublicKey: hostKeyString) {
-                    KnownHostsManager.addEntry(host: host, port: port, key: savedKey)
+            let result = await promptHandler(promptType)
+            switch result {
+            case .reject:
+                validationCompletePromise.fail(SSHSessionError.hostKeyRejected)
+            case .acceptOnce:
+                validationCompletePromise.succeed(())
+            case .acceptAndSave:
+                if let savedKey = try? NIOSSHPublicKey(openSSHPublicKey: hostKeyString) {
+                    if isUnknown {
+                        KnownHostsManager.addEntry(host: host, port: port, key: savedKey)
+                    } else {
+                        KnownHostsManager.updateEntry(host: host, port: port, key: savedKey)
+                    }
                 }
                 validationCompletePromise.succeed(())
-            } else {
-                validationCompletePromise.fail(SSHSessionError.hostKeyRejected)
             }
         }
     }
