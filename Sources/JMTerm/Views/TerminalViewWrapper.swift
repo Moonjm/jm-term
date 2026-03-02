@@ -127,6 +127,28 @@ struct TerminalViewWrapper: NSViewRepresentable {
         tv.optionAsMetaKey = true
         tv.allowMouseReporting = true
         tv.getTerminal().setCursorStyle(.steadyBlock)
+
+        // 커스텀 16색 ANSI 팔레트 (디렉토리 색상을 밝은 파랑으로 변경)
+        let c = { (r: UInt16, g: UInt16, b: UInt16) in SwiftTerm.Color(red: r * 257, green: g * 257, blue: b * 257) }
+        tv.installColors([
+            c(0, 0, 0),         // 0  black
+            c(153, 0, 1),       // 1  red
+            c(0, 166, 3),       // 2  green
+            c(153, 153, 0),     // 3  yellow
+            c(70, 130, 230),    // 4  blue
+            c(178, 0, 178),     // 5  magenta
+            c(0, 165, 178),     // 6  cyan
+            c(191, 191, 191),   // 7  white
+            c(138, 137, 138),   // 8  bright black
+            c(229, 0, 1),       // 9  bright red
+            c(0, 216, 0),       // 10 bright green
+            c(229, 229, 0),     // 11 bright yellow
+            c(92, 159, 255),    // 12 bright blue
+            c(229, 0, 229),     // 13 bright magenta
+            c(0, 229, 229),     // 14 bright cyan
+            c(229, 229, 229),   // 15 bright white
+        ])
+
         return tv
     }
 
