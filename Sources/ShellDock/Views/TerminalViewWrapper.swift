@@ -5,11 +5,30 @@ import AppKit
 
 private class PaddedContainerView: NSView {
     let inset: CGFloat = 8
+    weak var coordinator: TerminalViewWrapper.Coordinator?
 
     override func layout() {
         super.layout()
         guard let terminalView = subviews.first else { return }
         terminalView.frame = bounds.insetBy(dx: inset, dy: inset)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let coordinator, let tv = coordinator.terminalView else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let deltaY = event.deltaY
+        guard deltaY != 0 else { super.scrollWheel(with: event); return }
+        guard tv.getTerminal().isCurrentBufferAlternate else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let lines = max(1, Int(abs(deltaY)))
+        let arrow: [UInt8] = deltaY > 0 ? [0x1b, 0x5b, 0x41] : [0x1b, 0x5b, 0x42]
+        for _ in 0..<lines {
+            coordinator.session?.sendToShell(Data(arrow))
+        }
     }
 }
 
@@ -21,26 +40,22 @@ struct TerminalViewWrapper: NSViewRepresentable {
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.black.cgColor
 
-        let terminalView = TerminalView(frame: .zero)
-        terminalView.terminalDelegate = context.coordinator
-
-        terminalView.nativeForegroundColor = NSColor(white: 0.85, alpha: 1)
-        terminalView.nativeBackgroundColor = NSColor.black
-        terminalView.caretColor = .systemGreen
-        terminalView.optionAsMetaKey = true
-        terminalView.allowMouseReporting = true
-        terminalView.getTerminal().setCursorStyle(.steadyBlock)
-
+        let terminalView = Self.makeTerminalView(delegate: context.coordinator)
         container.addSubview(terminalView)
+        container.coordinator = context.coordinator
         context.coordinator.terminalView = terminalView
         context.coordinator.session = session
-        context.coordinator.installScrollMonitor()
         session.terminalView = terminalView
 
         Task { @MainActor in
-            while !session.isConnected {
+            for _ in 0..<100 {
+                if session.isConnected { break }
                 try await Task.sleep(for: .milliseconds(100))
                 if session.statusMessage.contains("실패") { return }
+            }
+            guard session.isConnected else {
+                session.statusMessage = "연결 시간 초과"
+                return
             }
             do {
                 try await session.startShell()
@@ -73,24 +88,21 @@ struct TerminalViewWrapper: NSViewRepresentable {
             coordinator.session = session
         } else {
             // 새 세션 — 터미널 생성 및 셸 시작
-            let tv = TerminalView(frame: .zero)
-            tv.terminalDelegate = coordinator
-            tv.nativeForegroundColor = NSColor(white: 0.85, alpha: 1)
-            tv.nativeBackgroundColor = NSColor.black
-            tv.caretColor = .systemGreen
-            tv.optionAsMetaKey = true
-            tv.allowMouseReporting = true
-            tv.getTerminal().setCursorStyle(.steadyBlock)
-
+            let tv = Self.makeTerminalView(delegate: coordinator)
             container.addSubview(tv)
             coordinator.terminalView = tv
             coordinator.session = session
             session.terminalView = tv
 
             Task { @MainActor in
-                while !session.isConnected {
+                for _ in 0..<100 {
+                    if session.isConnected { break }
                     try await Task.sleep(for: .milliseconds(100))
                     if session.statusMessage.contains("실패") { return }
+                }
+                guard session.isConnected else {
+                    session.statusMessage = "연결 시간 초과"
+                    return
                 }
                 do {
                     try await session.startShell()
@@ -106,6 +118,18 @@ struct TerminalViewWrapper: NSViewRepresentable {
         }
     }
 
+    private static func makeTerminalView(delegate: Coordinator) -> TerminalView {
+        let tv = TerminalView(frame: .zero)
+        tv.terminalDelegate = delegate
+        tv.nativeForegroundColor = NSColor(white: 0.85, alpha: 1)
+        tv.nativeBackgroundColor = NSColor.black
+        tv.caretColor = .systemGreen
+        tv.optionAsMetaKey = true
+        tv.allowMouseReporting = true
+        tv.getTerminal().setCursorStyle(.steadyBlock)
+        return tv
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -113,33 +137,9 @@ struct TerminalViewWrapper: NSViewRepresentable {
     /// Coordinator bridges SwiftTerm's TerminalViewDelegate to our SSHSession.
     /// The delegate methods are always called on the main thread by AppKit,
     /// so we use MainActor.assumeIsolated to safely access @MainActor-isolated SSHSession.
-    final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate, @unchecked Sendable {
+    final class Coordinator: NSObject, TerminalViewDelegate, @unchecked Sendable {
         @MainActor var session: SSHSession?
         var terminalView: TerminalView?
-        var scrollMonitor: Any?
-
-        @MainActor
-        func installScrollMonitor() {
-            guard scrollMonitor == nil else { return }
-            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, let tv = self.terminalView else { return event }
-                let deltaY = event.deltaY
-                guard deltaY != 0 else { return event }
-                let pt = tv.convert(event.locationInWindow, from: nil)
-                guard tv.bounds.contains(pt), event.window === tv.window else { return event }
-                guard tv.getTerminal().isCurrentBufferAlternate else { return event }
-                let lines = max(1, Int(abs(deltaY)))
-                let arrow: [UInt8] = deltaY > 0 ? [0x1b, 0x5b, 0x41] : [0x1b, 0x5b, 0x42]
-                for _ in 0..<lines {
-                    self.session?.sendToShell(Data(arrow))
-                }
-                return nil
-            }
-        }
-
-        deinit {
-            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
-        }
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             MainActor.assumeIsolated {

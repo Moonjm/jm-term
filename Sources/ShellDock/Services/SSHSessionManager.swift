@@ -78,6 +78,7 @@ final class SSHSession: Identifiable {
                     host: connection.host,
                     port: connection.port,
                     authenticationMethod: authMethod,
+                    // TODO: known_hosts 기반 호스트 키 검증 구현 (MITM 방지)
                     hostKeyValidator: .acceptAnything(),
                     reconnect: .never
                 )
@@ -90,7 +91,7 @@ final class SSHSession: Identifiable {
                 }
             }
         }
-        guard let sshClient else { throw lastError! }
+        guard let sshClient else { throw lastError ?? SSHSessionError.notConnected }
 
         self.client = sshClient
         isConnected = true
@@ -352,7 +353,7 @@ final class SSHSession: Identifiable {
                     let now = Date()
                     if let prev = prevNet {
                         let elapsed = now.timeIntervalSince(prev.time)
-                        if elapsed > 0 {
+                        if elapsed > 0, rx >= prev.rx, tx >= prev.tx {
                             newStats.netRxSpeed = UInt64(Double(rx - prev.rx) / elapsed)
                             newStats.netTxSpeed = UInt64(Double(tx - prev.tx) / elapsed)
                         }

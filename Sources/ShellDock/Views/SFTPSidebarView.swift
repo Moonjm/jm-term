@@ -117,10 +117,12 @@ struct SFTPSidebarView: View {
 
         }
         .task {
-            while !session.isSFTPReady {
+            for _ in 0..<50 {
+                if session.isSFTPReady { break }
                 try? await Task.sleep(for: .milliseconds(200))
                 if session.statusMessage.contains("실패") { return }
             }
+            guard session.isSFTPReady else { return }
             trackedPath = session.currentPath
             editingPath = session.currentPath
             await loadDirectory()
@@ -166,7 +168,8 @@ struct SFTPSidebarView: View {
 
     private func cdInTerminal(_ path: String) {
         session.currentPath = path
-        session.sendToShell(Data("cd \(path)\n".utf8))
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        session.sendToShell(Data("cd '\(escaped)'\n".utf8))
     }
 
     private func dragProvider(for node: FileNode) -> NSItemProvider {

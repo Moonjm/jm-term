@@ -35,19 +35,11 @@ struct EditConnectionView: View {
             Text("서버 수정")
                 .font(.headline)
 
-            Form {
-                TextField("이름", text: $name)
-                TextField("호스트", text: $host)
-                TextField("포트", text: $port)
-                TextField("사용자", text: $username)
-
-                Toggle("SSH 키 사용", isOn: $useKey)
-                if useKey {
-                    TextField("키 경로", text: $keyPath)
-                } else {
-                    SecureField("비밀번호", text: $password)
-                }
-            }
+            ConnectionFormView(
+                name: $name, host: $host, port: $port,
+                username: $username, password: $password,
+                useKey: $useKey, keyPath: $keyPath
+            )
 
             HStack {
                 Button("취소") { dismiss() }
