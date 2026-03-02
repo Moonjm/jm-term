@@ -102,12 +102,12 @@ final class SFTPViewModel {
     func commitRename() {
         guard let node = renamingNode else { return }
         let newName = renamingName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !newName.isEmpty, newName != node.name else {
+        guard !newName.isEmpty, newName != node.name, !newName.contains("/") else {
             renamingNode = nil
             return
         }
-        let parentPath = (node.path as NSString).deletingLastPathComponent
-        let newPath = parentPath == "/" ? "/\(newName)" : "\(parentPath)/\(newName)"
+        let parentURL = URL(fileURLWithPath: node.path).deletingLastPathComponent()
+        let newPath = parentURL.appendingPathComponent(newName).path
         renamingNode = nil
         Task {
             do {
@@ -124,6 +124,16 @@ final class SFTPViewModel {
     }
 
     func deleteNode(_ node: FileNode) {
+        let alert = NSAlert()
+        alert.messageText = "'\(node.name)' 삭제"
+        alert.informativeText = node.isDirectory
+            ? "이 디렉토리를 삭제하시겠습니까? (빈 디렉토리만 삭제 가능)"
+            : "이 파일을 삭제하시겠습니까?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "삭제")
+        alert.addButton(withTitle: "취소")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
         Task {
             do {
                 if node.isDirectory {
