@@ -38,7 +38,7 @@ struct ContentView: View {
     @State private var lastClickDate = Date.distantPast
     @State private var sidebarTab: SidebarTab = .servers
     @State private var hostKeyPrompt: HostKeyPromptType?
-    @State private var hostKeyPromptContinuation: CheckedContinuation<Bool, Never>?
+    @State private var hostKeyQueue: [(promptType: HostKeyPromptType, continuation: CheckedContinuation<Bool, Never>)] = []
 
     private var activeSession: SSHSession? {
         sessions.first { $0.id == activeSessionID }
@@ -165,11 +165,9 @@ struct ContentView: View {
         }
         .sheet(item: $hostKeyPrompt) { prompt in
             HostKeyPromptView(promptType: prompt) {
-                hostKeyPromptContinuation?.resume(returning: true)
-                hostKeyPromptContinuation = nil
+                resolveHostKeyPrompt(accepted: true)
             } onReject: {
-                hostKeyPromptContinuation?.resume(returning: false)
-                hostKeyPromptContinuation = nil
+                resolveHostKeyPrompt(accepted: false)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -283,8 +281,10 @@ struct ContentView: View {
         let session = SSHSession(connection: connection)
         session.hostKeyPromptHandler = { [self] promptType in
             await withCheckedContinuation { continuation in
-                hostKeyPromptContinuation = continuation
-                hostKeyPrompt = promptType
+                hostKeyQueue.append((promptType, continuation))
+                if hostKeyPrompt == nil {
+                    showNextHostKeyPrompt()
+                }
             }
         }
         sessions.append(session)
@@ -294,10 +294,33 @@ struct ContentView: View {
             do {
                 try await session.connect(password: password)
                 session.startStatsMonitor()
-                try await session.openSFTP()
+                do {
+                    try await session.openSFTP()
+                } catch {
+                    session.statusMessage = "연결됨 (SFTP 사용 불가)"
+                }
             } catch {
                 session.statusMessage = "연결 실패: \(error.localizedDescription)"
             }
+        }
+    }
+
+    private func showNextHostKeyPrompt() {
+        guard !hostKeyQueue.isEmpty else {
+            hostKeyPrompt = nil
+            return
+        }
+        hostKeyPrompt = hostKeyQueue.first?.promptType
+    }
+
+    private func resolveHostKeyPrompt(accepted: Bool) {
+        guard !hostKeyQueue.isEmpty else { return }
+        let entry = hostKeyQueue.removeFirst()
+        entry.continuation.resume(returning: accepted)
+        // Show next queued prompt after a short delay for sheet dismissal
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            showNextHostKeyPrompt()
         }
     }
 
