@@ -207,10 +207,10 @@ private struct FileContextMenu: NSViewRepresentable {
     }
 }
 
-final class FileContextMenuView: NSView, @unchecked Sendable {
+final class FileContextMenuView: NSView {
     var node: FileNode!
     var viewModel: SFTPViewModel!
-    private var monitor: Any?
+    nonisolated(unsafe) private var monitor: Any?
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         return nil
@@ -270,6 +270,12 @@ final class FileContextMenuView: NSView, @unchecked Sendable {
 
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
+
+    deinit {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
 }
 
 private final class ClosureMenuItem: NSMenuItem {
@@ -281,7 +287,7 @@ private final class ClosureMenuItem: NSMenuItem {
         self.target = self
     }
 
-    required init(coder: NSCoder) { fatalError() }
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     @objc private func execute() {
         closure()
