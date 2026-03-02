@@ -16,6 +16,7 @@ final class SessionCoordinator {
     var sidebarTab: SidebarTab = .servers
     var hostKeyPrompt: HostKeyPromptType?
     private var hostKeyQueue: [(promptType: HostKeyPromptType, continuation: CheckedContinuation<HostKeyPromptResult, Never>)] = []
+    private var promptResolved = false
 
     var hasQueuedPrompts: Bool { !hostKeyQueue.isEmpty }
 
@@ -113,7 +114,17 @@ final class SessionCoordinator {
         }
     }
 
+    /// 사용자가 응답하지 않고 sheet를 닫았을 때만 reject 처리
+    func handlePromptDismissed() {
+        if !promptResolved, !hostKeyQueue.isEmpty {
+            let entry = hostKeyQueue.removeFirst()
+            entry.continuation.resume(returning: .reject)
+        }
+        promptResolved = false
+    }
+
     func showNextHostKeyPrompt() {
+        promptResolved = false
         guard !hostKeyQueue.isEmpty else {
             hostKeyPrompt = nil
             return
@@ -123,6 +134,7 @@ final class SessionCoordinator {
 
     func resolveHostKeyPrompt(result: HostKeyPromptResult) {
         guard !hostKeyQueue.isEmpty else { return }
+        promptResolved = true
         let entry = hostKeyQueue.removeFirst()
         entry.continuation.resume(returning: result)
         Task { @MainActor in
