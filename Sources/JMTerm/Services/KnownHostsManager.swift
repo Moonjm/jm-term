@@ -3,6 +3,7 @@ import Foundation
 import Crypto
 import NIOCore
 import NIOSSH
+import OSLog
 
 enum HostKeyStatus {
     case trusted(Set<NIOSSHPublicKey>)
@@ -137,9 +138,22 @@ struct KnownHostsManager {
         return matched
     }
 
+    // MARK: - Hostname validation
+
+    /// hostname에 콤마, 공백, 개행 등 known_hosts injection에 사용될 수 있는 문자가 없는지 검증
+    private static func isValidHostname(_ host: String) -> Bool {
+        !host.isEmpty && host.allSatisfy { c in
+            c.isASCII && c != "," && c != " " && c != "\t" && c != "\n" && c != "\r"
+        }
+    }
+
     // MARK: - Add entry
 
     static func addEntry(host: String, port: Int, key: NIOSSHPublicKey) {
+        guard isValidHostname(host) else {
+            Logger.app.error("[KnownHosts] 유효하지 않은 호스트명: \(host)")
+            return
+        }
         let hostnameField = port == 22 ? host : "[\(host)]:\(port)"
         let serialized = String(openSSHPublicKey: key)
         let line = "\(hostnameField) \(serialized)\n"

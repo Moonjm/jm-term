@@ -1,4 +1,5 @@
 import SwiftUI
+import OSLog
 
 struct EditConnectionView: View {
     @Environment(\.dismiss) private var dismiss
@@ -69,7 +70,7 @@ struct EditConnectionView: View {
             do {
                 try connectionStore.savePassword(password, for: updated)
             } catch {
-                print("[EditConnection] 패스워드 저장 에러: \(error)")
+                Logger.app.error("[EditConnection] 패스워드 저장 에러: \(error)")
             }
         }
 

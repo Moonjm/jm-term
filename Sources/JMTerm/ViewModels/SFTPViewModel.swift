@@ -110,7 +110,9 @@ final class SFTPViewModel {
                 let tempDir = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
                 try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                let tempURL = tempDir.appendingPathComponent(fileName)
+                // Path traversal 방지: 파일명에서 경로 구분자 제거
+                let safeName = (fileName as NSString).lastPathComponent
+                let tempURL = tempDir.appendingPathComponent(safeName)
                 do {
                     try await sftpBox.value.downloadFile(remotePath: remotePath, localURL: tempURL)
                     completion(tempURL, true, nil)
