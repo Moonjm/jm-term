@@ -64,8 +64,17 @@ struct SFTPSidebarView: View {
                             Button {
                                 viewModel.handleFileClick(node)
                             } label: {
-                                FileItemRow(node: node)
+                                if viewModel.renamingNode?.id == node.id {
+                                    RenameRow(node: node, name: $viewModel.renamingName) {
+                                        viewModel.commitRename()
+                                    } onCancel: {
+                                        viewModel.cancelRename()
+                                    }
                                     .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    FileItemRow(node: node)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
                             }
                             .buttonStyle(.plain)
                             .padding(.horizontal, 6)
@@ -74,15 +83,9 @@ struct SFTPSidebarView: View {
                                 RoundedRectangle(cornerRadius: 4)
                                     .fill(viewModel.selectedID == node.id ? Color.accentColor.opacity(0.25) : Color.clear)
                             )
-                            .contextMenu {
-                                if node.isDirectory && node.name != ".." {
-                                    Button("열기") { viewModel.navigateTo(node.path) }
-                                    Button("터미널에서 이동") { viewModel.cdInTerminal(node.path) }
-                                }
-                                if !node.isDirectory {
-                                    Button("다운로드") { viewModel.downloadNode(node) }
-                                }
-                            }
+                            .overlay(
+                                FileContextMenu(node: node, viewModel: viewModel)
+                            )
                             .onDrag {
                                 viewModel.dragProvider(for: node)
                             }
@@ -95,6 +98,11 @@ struct SFTPSidebarView: View {
                     return true
                 }
                 .border(viewModel.isDropTargeted ? Color.accentColor : Color.clear, width: 2)
+                .contextMenu {
+                    Button("새로고침") {
+                        Task { await viewModel.loadDirectory() }
+                    }
+                }
             }
 
         }
@@ -104,6 +112,30 @@ struct SFTPSidebarView: View {
         .onChange(of: viewModel.session.currentPath) { _, newPath in
             viewModel.handlePathChange(newPath)
         }
+    }
+}
+
+// MARK: - Rename Row
+
+struct RenameRow: View {
+    let node: FileNode
+    @Binding var name: String
+    var onCommit: () -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: node.isDirectory ? "folder.fill" : "doc")
+                .foregroundStyle(node.isDirectory ? .blue : .secondary)
+                .frame(width: 16)
+
+            TextField("이름", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(.callout)
+                .onSubmit { onCommit() }
+                .onExitCommand { onCancel() }
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -155,3 +187,103 @@ struct FileItemRow: View {
         return String(format: "%.1f GB", Double(bytes) / 1_073_741_824)
     }
 }
+
+// MARK: - File Context Menu (NSMenu)
+
+private struct FileContextMenu: NSViewRepresentable {
+    let node: FileNode
+    let viewModel: SFTPViewModel
+
+    func makeNSView(context: Context) -> FileContextMenuView {
+        let view = FileContextMenuView()
+        view.node = node
+        view.viewModel = viewModel
+        return view
+    }
+
+    func updateNSView(_ nsView: FileContextMenuView, context: Context) {
+        nsView.node = node
+        nsView.viewModel = viewModel
+    }
+}
+
+final class FileContextMenuView: NSView, @unchecked Sendable {
+    var node: FileNode!
+    var viewModel: SFTPViewModel!
+    private var monitor: Any?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil && monitor == nil {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window else { return event }
+                let point = self.convert(event.locationInWindow, from: nil)
+                guard self.bounds.contains(point) else { return event }
+                self.showContextMenu(with: event)
+                return nil
+            }
+        } else if window == nil, let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+    }
+
+    private func showContextMenu(with event: NSEvent) {
+        viewModel.selectedID = node.id
+
+        guard node.name != ".." else { return }
+
+        let menu = NSMenu()
+
+        if node.isDirectory {
+            menu.addItem(ClosureMenuItem(title: "열기") { [node, viewModel] in
+                viewModel?.navigateTo(node!.path)
+            })
+            menu.addItem(ClosureMenuItem(title: "터미널에서 이동") { [node, viewModel] in
+                viewModel?.cdInTerminal(node!.path)
+            })
+        } else {
+            menu.addItem(ClosureMenuItem(title: "다운로드") { [node, viewModel] in
+                viewModel?.downloadNode(node!)
+            })
+        }
+
+        menu.addItem(.separator())
+
+        menu.addItem(ClosureMenuItem(title: "이름 변경") { [node, viewModel] in
+            viewModel?.beginRename(node!)
+        })
+
+        let deleteItem = ClosureMenuItem(title: "삭제") { [node, viewModel] in
+            viewModel?.deleteNode(node!)
+        }
+        deleteItem.attributedTitle = NSAttributedString(
+            string: "삭제",
+            attributes: [.foregroundColor: NSColor.systemRed]
+        )
+        menu.addItem(deleteItem)
+
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+}
+
+private final class ClosureMenuItem: NSMenuItem {
+    private var closure: () -> Void
+
+    init(title: String, closure: @escaping () -> Void) {
+        self.closure = closure
+        super.init(title: title, action: #selector(execute), keyEquivalent: "")
+        self.target = self
+    }
+
+    required init(coder: NSCoder) { fatalError() }
+
+    @objc private func execute() {
+        closure()
+    }
+}
+

@@ -94,6 +94,21 @@ final class SFTPService {
         }
     }
 
+    func renameItem(oldPath: String, newPath: String) async throws {
+        guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
+        try await sftp.rename(at: oldPath, to: newPath)
+    }
+
+    func deleteFile(at path: String) async throws {
+        guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
+        try await sftp.remove(at: path)
+    }
+
+    func deleteDirectory(at path: String) async throws {
+        guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
+        try await sftp.rmdir(at: path)
+    }
+
     func close() async {
         if let sftp = sftpClient {
             try? await sftp.close()
