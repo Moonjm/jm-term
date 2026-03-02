@@ -163,7 +163,12 @@ struct ContentView: View {
         .sheet(item: $editingConnection) { conn in
             EditConnectionView(connectionStore: connectionStore, connection: conn)
         }
-        .sheet(item: $hostKeyPrompt) { prompt in
+        .sheet(item: $hostKeyPrompt, onDismiss: {
+            // Esc 등으로 시트가 닫힐 때 대기 중인 continuation이 멈추지 않도록 처리
+            if !hostKeyQueue.isEmpty {
+                resolveHostKeyPrompt(accepted: false)
+            }
+        }) { prompt in
             HostKeyPromptView(promptType: prompt) {
                 resolveHostKeyPrompt(accepted: true)
             } onReject: {

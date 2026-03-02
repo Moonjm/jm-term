@@ -107,31 +107,16 @@ final class SSHSession: Identifiable {
     }
 
     private func buildHostKeyValidator() -> SSHHostKeyValidator {
-        let host = connection.host
-        let port = connection.port
-        let promptHandler = hostKeyPromptHandler
+        let status = KnownHostsManager.lookup(host: connection.host, port: connection.port)
+        let knownKeys: Set<NIOSSHPublicKey>? = if case .trusted(let keys) = status { keys } else { nil }
 
-        let status = KnownHostsManager.lookup(host: host, port: port)
-
-        switch status {
-        case .trusted(let knownKeys):
-            // Use .custom to detect key mismatch (server key not in known set)
-            let validator = HostKeyValidationDelegate(
-                knownKeys: knownKeys,
-                host: host,
-                port: port,
-                promptHandler: promptHandler
-            )
-            return .custom(validator)
-        case .unknown:
-            let validator = HostKeyValidationDelegate(
-                knownKeys: nil,
-                host: host,
-                port: port,
-                promptHandler: promptHandler
-            )
-            return .custom(validator)
-        }
+        let validator = HostKeyValidationDelegate(
+            knownKeys: knownKeys,
+            host: connection.host,
+            port: connection.port,
+            promptHandler: hostKeyPromptHandler
+        )
+        return .custom(validator)
     }
 
     func startShell() async throws {
@@ -436,7 +421,12 @@ private final class HostKeyValidationDelegate: NIOSSHClientServerAuthenticationD
         let isUnknown = knownKeys == nil
         let promptType: HostKeyPromptType
         if let knownKeys, !knownKeys.isEmpty {
-            let oldFingerprint = KnownHostsManager.fingerprint(of: knownKeys.first!)
+            // Find the same key type for comparison, fallback to first
+            let newKeyType = String(openSSHPublicKey: hostKey).split(separator: " ").first.map(String.init)
+            let matchingKey = knownKeys.first { key in
+                String(openSSHPublicKey: key).split(separator: " ").first.map(String.init) == newKeyType
+            } ?? knownKeys.first!
+            let oldFingerprint = KnownHostsManager.fingerprint(of: matchingKey)
             promptType = .mismatch(host: host, oldFingerprint: oldFingerprint, newFingerprint: newFingerprint)
         } else {
             promptType = .unknown(host: host, fingerprint: newFingerprint)
