@@ -58,13 +58,20 @@ final class ConnectionStore {
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(connections) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(connections)
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            print("[ConnectionStore] save 에러: \(error)")
+        }
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([ServerConnection].self, from: data) else { return }
-        connections = decoded
+        do {
+            let data = try Data(contentsOf: fileURL)
+            connections = try JSONDecoder().decode([ServerConnection].self, from: data)
+        } catch {
+            print("[ConnectionStore] load 에러: \(error)")
+        }
     }
 }

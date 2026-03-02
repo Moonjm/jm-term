@@ -1,4 +1,4 @@
-// Sources/JMTerm/Services/SSHSessionManager.swift
+// Sources/JMTerm/Services/SSHSession.swift
 import Foundation
 import Citadel
 import NIOCore
@@ -11,19 +11,8 @@ import SwiftTerm
 /// Wraps a non-Sendable value so it can cross isolation boundaries.
 /// Safety: The caller must ensure that the wrapped value is only accessed
 /// from the appropriate context (e.g., always from @MainActor).
-private struct UncheckedSendableBox<T>: @unchecked Sendable {
+struct UncheckedSendableBox<T>: @unchecked Sendable {
     let value: T
-}
-
-struct ServerStats {
-    var cpuUsage: Double = 0       // %
-    var memTotal: UInt64 = 0       // KB
-    var memUsed: UInt64 = 0        // KB
-    var diskTotal: String = ""     // "96G"
-    var diskUsed: String = ""      // "48G"
-    var diskPercent: String = ""   // "50%"
-    var netRxSpeed: UInt64 = 0     // bytes/sec
-    var netTxSpeed: UInt64 = 0     // bytes/sec
 }
 
 /// Callback type for host key verification UI.
@@ -35,10 +24,15 @@ final class SSHSession: Identifiable {
     let id = UUID()
     let connection: ServerConnection
     var isConnected = false
-    var isSFTPReady = false
     var statusMessage = "연결 대기 중"
-    var currentPath = "/"
-    var stats: ServerStats?
+    let statsMonitor = StatsMonitor()
+    let sftpService = SFTPService()
+
+    var isSFTPReady: Bool { sftpService.isSFTPReady }
+    var currentPath: String {
+        get { sftpService.currentPath }
+        set { sftpService.currentPath = newValue }
+    }
 
     /// Set this before calling connect() to enable host key verification UI.
     var hostKeyPromptHandler: HostKeyPromptHandler?
@@ -46,14 +40,9 @@ final class SSHSession: Identifiable {
     // These properties hold non-Sendable types from Citadel.
     // They are only accessed on @MainActor. We use UncheckedSendableBox
     // when passing them to nonisolated Citadel async methods.
-    private var client: SSHClient?
-    private var sftpClient: SFTPClient?
+    private(set) var client: SSHClient?
     private var stdinWriter: TTYStdinWriter?
     weak var terminalView: TerminalView?
-
-    private var statsTask: Task<Void, Never>?
-    private var prevCPU: (idle: UInt64, total: UInt64)?
-    private var prevNet: (rx: UInt64, tx: UInt64, time: Date)?
 
     init(connection: ServerConnection) {
         self.connection = connection
@@ -124,21 +113,11 @@ final class SSHSession: Identifiable {
 
         // SFTP 준비 대기 후 MOTD 읽어서 셸 시작 전에 표시
         for _ in 0..<20 {
-            if sftpClient != nil { break }
+            if sftpService.isSFTPReady { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
-        if let sftp = sftpClient {
-            var motdText = ""
-            if let buf = try? await sftp.withFile(filePath: "/run/motd.dynamic", flags: .read, { try await $0.readAll() }) {
-                motdText += String(buffer: buf)
-            }
-            if let buf = try? await sftp.withFile(filePath: "/etc/motd", flags: .read, { try await $0.readAll() }) {
-                motdText += String(buffer: buf)
-            }
-            if !motdText.isEmpty {
-                let display = motdText.replacingOccurrences(of: "\n", with: "\r\n")
-                terminalView.feed(byteArray: Array(display.utf8)[...])
-            }
+        if sftpService.isSFTPReady {
+            await sftpService.readMOTD(terminalView: terminalView)
         }
 
         let terminal = terminalView.getTerminal()
@@ -219,194 +198,25 @@ final class SSHSession: Identifiable {
         }
     }
 
-    // MARK: - SFTP operations
+    // MARK: - SFTP
 
     func openSFTP() async throws {
         guard let client else { return }
-        let clientBox = UncheckedSendableBox(value: client)
-        let sftp = try await clientBox.value.openSFTP()
-        sftpClient = sftp
-        currentPath = try await sftp.getRealPath(atPath: ".")
-        isSFTPReady = true
-    }
-
-    func listDirectory(at path: String) async throws -> [FileNode] {
-        guard let sftp = sftpClient else { return [] }
-        let entries = try await sftp.listDirectory(atPath: path)
-        return entries.flatMap { name in
-            name.components.compactMap { component in
-                let fileName = component.filename
-                guard fileName != "." && fileName != ".." else { return nil }
-                let isDir = component.attributes.permissions.map { $0 & 0o40000 != 0 } ?? false
-                return FileNode(
-                    name: fileName,
-                    path: path == "/" ? "/\(fileName)" : "\(path)/\(fileName)",
-                    isDirectory: isDir,
-                    size: component.attributes.size,
-                    permissions: component.attributes.permissions,
-                    children: isDir ? [] : nil
-                )
-            }
-        }.sorted { a, b in
-            if a.isDirectory != b.isDirectory { return a.isDirectory }
-            return a.name.localizedCompare(b.name) == .orderedAscending
-        }
-    }
-
-    nonisolated private static let chunkSize: UInt32 = 1024 * 1024 // 1MB chunks
-
-    func downloadFile(remotePath: String, localURL: URL) async throws {
-        guard let sftp = sftpClient else { return }
-        try await sftp.withFile(filePath: remotePath, flags: .read) { file in
-            let attrs = try await file.readAttributes()
-            let fileSize = attrs.size ?? 0
-
-            FileManager.default.createFile(atPath: localURL.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: localURL)
-            defer { handle.closeFile() }
-
-            var offset: UInt64 = 0
-            while offset < fileSize {
-                let chunk = try await file.read(from: offset, length: SSHSession.chunkSize)
-                let data = Data(buffer: chunk)
-                handle.write(data)
-                offset += UInt64(data.count)
-                if data.isEmpty { break }
-            }
-        }
-    }
-
-    func uploadFile(localURL: URL, remotePath: String) async throws {
-        guard let sftp = sftpClient else { return }
-        let handle = try FileHandle(forReadingFrom: localURL)
-        defer { handle.closeFile() }
-
-        try await sftp.withFile(filePath: remotePath, flags: [.write, .create, .truncate]) { file in
-            var offset: UInt64 = 0
-            while true {
-                let data = handle.readData(ofLength: Int(SSHSession.chunkSize))
-                if data.isEmpty { break }
-                try await file.write(ByteBuffer(data: data), at: offset)
-                offset += UInt64(data.count)
-            }
-        }
+        try await sftpService.open(client: client)
     }
 
     func disconnect() async {
-        stopStatsMonitor()
-        if let sftp = sftpClient {
-            try? await sftp.close()
-        }
+        statsMonitor.stop()
+        await sftpService.close()
         if let client {
             let clientBox = UncheckedSendableBox(value: client)
             try? await clientBox.value.close()
         }
-        sftpClient = nil
         client = nil
         stdinWriter = nil
         isConnected = false
         statusMessage = "연결 끊김"
-        stats = nil
-    }
-
-    // MARK: - Server Stats Monitoring
-
-    func startStatsMonitor() {
-        guard let client else { return }
-        let clientBox = UncheckedSendableBox(value: client)
-        let sessionBox = UncheckedSendableBox<SSHSession>(value: self)
-
-        statsTask = Task.detached {
-            while !Task.isCancelled {
-                do {
-                    let cmd = """
-                    head -1 /proc/stat; \
-                    awk '/MemTotal/{printf "MEMTOTAL %d\\n",$2}/MemAvailable/{printf "MEMAVAIL %d\\n",$2}' /proc/meminfo; \
-                    df -h / | awk 'NR==2{printf "DISK %s %s %s\\n",$2,$3,$5}'; \
-                    awk 'NR>2{rx+=$2;tx+=$10}END{printf "NET %d %d\\n",rx,tx}' /proc/net/dev
-                    """
-                    let output = try await clientBox.value.executeCommand(cmd)
-                    let text = String(buffer: output)
-                    await MainActor.run {
-                        sessionBox.value.parseStats(text)
-                    }
-                } catch {
-                    // 명령 실패 시 무시하고 다음 폴링 대기
-                }
-                try? await Task.sleep(for: .seconds(3))
-            }
-        }
-    }
-
-    func stopStatsMonitor() {
-        statsTask?.cancel()
-        statsTask = nil
-    }
-
-    private func parseStats(_ output: String) {
-        let lines = output.components(separatedBy: "\n")
-        var newStats = ServerStats()
-
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            // CPU: "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
-            if trimmed.hasPrefix("cpu ") {
-                let parts = trimmed.split(separator: " ").dropFirst() // drop "cpu"
-                let values = parts.compactMap { UInt64($0) }
-                if values.count >= 4 {
-                    let idle = values[3]
-                    let total = values.reduce(0, +)
-                    if let prev = prevCPU {
-                        let totalDelta = total - prev.total
-                        let idleDelta = idle - prev.idle
-                        if totalDelta > 0 {
-                            newStats.cpuUsage = Double(totalDelta - idleDelta) / Double(totalDelta) * 100
-                        }
-                    }
-                    prevCPU = (idle: idle, total: total)
-                }
-            }
-
-            if trimmed.hasPrefix("MEMTOTAL ") {
-                let val = trimmed.replacingOccurrences(of: "MEMTOTAL ", with: "")
-                newStats.memTotal = UInt64(val) ?? 0
-            }
-
-            if trimmed.hasPrefix("MEMAVAIL ") {
-                let val = trimmed.replacingOccurrences(of: "MEMAVAIL ", with: "")
-                let avail = UInt64(val) ?? 0
-                newStats.memUsed = newStats.memTotal > avail ? newStats.memTotal - avail : 0
-            }
-
-            if trimmed.hasPrefix("DISK ") {
-                let parts = trimmed.split(separator: " ")
-                if parts.count >= 4 {
-                    newStats.diskTotal = String(parts[1])
-                    newStats.diskUsed = String(parts[2])
-                    newStats.diskPercent = String(parts[3])
-                }
-            }
-
-            if trimmed.hasPrefix("NET ") {
-                let parts = trimmed.split(separator: " ")
-                if parts.count >= 3 {
-                    let rx = UInt64(parts[1]) ?? 0
-                    let tx = UInt64(parts[2]) ?? 0
-                    let now = Date()
-                    if let prev = prevNet {
-                        let elapsed = now.timeIntervalSince(prev.time)
-                        if elapsed > 0, rx >= prev.rx, tx >= prev.tx {
-                            newStats.netRxSpeed = UInt64(Double(rx - prev.rx) / elapsed)
-                            newStats.netTxSpeed = UInt64(Double(tx - prev.tx) / elapsed)
-                        }
-                    }
-                    prevNet = (rx: rx, tx: tx, time: now)
-                }
-            }
-        }
-
-        stats = newStats
+        statsMonitor.stats = nil
     }
 }
 

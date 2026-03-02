@@ -3,21 +3,12 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-private struct UncheckedBox<T>: @unchecked Sendable {
-    let value: T
-}
-
 struct SFTPSidebarView: View {
-    let session: SSHSession
-    @State private var items: [FileNode] = []
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-    @State private var trackedPath: String = ""
-    @State private var editingPath: String = ""
-    @State private var selectedID: FileNode.ID?
-    @State private var lastClickID: FileNode.ID?
-    @State private var lastClickDate = Date.distantPast
-    @State private var isDropTargeted = false
+    @State private var viewModel: SFTPViewModel
+
+    init(session: SSHSession) {
+        _viewModel = State(initialValue: SFTPViewModel(session: session))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,14 +17,14 @@ struct SFTPSidebarView: View {
                 Image(systemName: "folder")
                     .foregroundStyle(.secondary)
 
-                TextField("경로", text: $editingPath)
+                TextField("경로", text: $viewModel.editingPath)
                     .textFieldStyle(.plain)
                     .font(.caption)
                     .onSubmit {
-                        navigateTo(editingPath)
+                        viewModel.navigateTo(viewModel.editingPath)
                     }
 
-                Button(action: { Task { await loadDirectory() } }) {
+                Button(action: { Task { await viewModel.loadDirectory() } }) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
@@ -46,20 +37,20 @@ struct SFTPSidebarView: View {
             Divider()
 
             // 파일 목록
-            if isLoading {
+            if viewModel.isLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error = errorMessage {
+            } else if let error = viewModel.errorMessage {
                 VStack {
                     Spacer()
                     Text(error)
                         .foregroundStyle(.secondary)
                         .font(.caption)
                         .padding()
-                    Button("다시 시도") { Task { await loadDirectory() } }
+                    Button("다시 시도") { Task { await viewModel.loadDirectory() } }
                     Spacer()
                 }
-            } else if items.isEmpty {
+            } else if viewModel.items.isEmpty {
                 VStack {
                     Spacer()
                     Text("빈 디렉토리")
@@ -69,18 +60,9 @@ struct SFTPSidebarView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(items) { node in
+                        ForEach(viewModel.items) { node in
                             Button {
-                                let now = Date()
-                                if node.id == lastClickID,
-                                   now.timeIntervalSince(lastClickDate) < 0.35,
-                                   node.isDirectory {
-                                    navigateTo(node.path)
-                                } else {
-                                    selectedID = node.id
-                                }
-                                lastClickID = node.id
-                                lastClickDate = now
+                                viewModel.handleFileClick(node)
                             } label: {
                                 FileItemRow(node: node)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -90,175 +72,37 @@ struct SFTPSidebarView: View {
                             .padding(.vertical, 1)
                             .background(
                                 RoundedRectangle(cornerRadius: 4)
-                                    .fill(selectedID == node.id ? Color.accentColor.opacity(0.25) : Color.clear)
+                                    .fill(viewModel.selectedID == node.id ? Color.accentColor.opacity(0.25) : Color.clear)
                             )
                             .contextMenu {
                                 if node.isDirectory && node.name != ".." {
-                                    Button("열기") { navigateTo(node.path) }
-                                    Button("터미널에서 이동") { cdInTerminal(node.path) }
+                                    Button("열기") { viewModel.navigateTo(node.path) }
+                                    Button("터미널에서 이동") { viewModel.cdInTerminal(node.path) }
                                 }
                                 if !node.isDirectory {
-                                    Button("다운로드") { downloadNode(node) }
+                                    Button("다운로드") { viewModel.downloadNode(node) }
                                 }
                             }
                             .onDrag {
-                                dragProvider(for: node)
+                                viewModel.dragProvider(for: node)
                             }
                         }
                     }
                     .padding(4)
                 }
-                .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-                    handleDrop(providers)
+                .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
+                    viewModel.handleDrop(providers)
                     return true
                 }
-                .border(isDropTargeted ? Color.accentColor : Color.clear, width: 2)
+                .border(viewModel.isDropTargeted ? Color.accentColor : Color.clear, width: 2)
             }
 
         }
         .task {
-            for _ in 0..<50 {
-                if session.isSFTPReady { break }
-                try? await Task.sleep(for: .milliseconds(200))
-                if session.statusMessage.contains("실패") { return }
-            }
-            guard session.isSFTPReady else { return }
-            trackedPath = session.currentPath
-            editingPath = session.currentPath
-            await loadDirectory()
+            await viewModel.initialLoad()
         }
-        .onChange(of: session.currentPath) { _, newPath in
-            if newPath != trackedPath {
-                trackedPath = newPath
-                editingPath = newPath
-                Task { await loadDirectory() }
-            }
-        }
-    }
-
-    @MainActor
-    private func loadDirectory() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            var loaded = try await session.listDirectory(at: session.currentPath)
-            if session.currentPath != "/" {
-                let parent = (session.currentPath as NSString).deletingLastPathComponent
-                let parentNode = FileNode(
-                    name: "..",
-                    path: parent.isEmpty ? "/" : parent,
-                    isDirectory: true,
-                    size: nil,
-                    permissions: nil,
-                    children: nil
-                )
-                loaded.insert(parentNode, at: 0)
-            }
-            items = loaded
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        isLoading = false
-    }
-
-    private func navigateTo(_ path: String) {
-        session.currentPath = path
-        editingPath = path
-    }
-
-    private func cdInTerminal(_ path: String) {
-        session.currentPath = path
-        let encoded = Data(path.utf8).base64EncodedString()
-        let command = "cd \"$(echo '\(encoded)' | base64 -d)\"\n"
-        session.sendToShell(Data(command.utf8))
-    }
-
-    private func dragProvider(for node: FileNode) -> NSItemProvider {
-        let provider = NSItemProvider()
-        provider.suggestedName = node.name
-
-        let sessionRef = UncheckedBox(value: session)
-        let remotePath = node.path
-        let fileName = node.name
-
-        provider.registerFileRepresentation(
-            forTypeIdentifier: UTType.data.identifier,
-            fileOptions: [],
-            visibility: .all
-        ) { completion in
-            Task { @MainActor in
-                let tempDir = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString)
-                try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                let tempURL = tempDir.appendingPathComponent(fileName)
-                do {
-                    try await sessionRef.value.downloadFile(remotePath: remotePath, localURL: tempURL)
-                    completion(tempURL, true, nil)
-                } catch {
-                    completion(nil, false, error)
-                }
-            }
-            return nil
-        }
-        return provider
-    }
-
-    private func handleDrop(_ providers: [NSItemProvider]) {
-        Task { @MainActor in
-            for provider in providers {
-                if let url = await loadFileURL(from: provider) {
-                    let remotePath = "\(session.currentPath)/\(url.lastPathComponent)"
-                    do {
-                        try await session.uploadFile(localURL: url, remotePath: remotePath)
-                    } catch {
-                        errorMessage = error.localizedDescription
-                    }
-                }
-            }
-            await loadDirectory()
-        }
-    }
-
-    private func loadFileURL(from provider: NSItemProvider) async -> URL? {
-        let providerRef = UncheckedBox(value: provider)
-        return await withCheckedContinuation { continuation in
-            providerRef.value.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                if let data = item as? Data,
-                   let url = URL(dataRepresentation: data, relativeTo: nil) {
-                    continuation.resume(returning: url)
-                } else {
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
-    }
-
-    @MainActor
-    private func uploadFile() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        Task {
-            do {
-                let remotePath = "\(session.currentPath)/\(url.lastPathComponent)"
-                try await session.uploadFile(localURL: url, remotePath: remotePath)
-                await loadDirectory()
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    @MainActor
-    private func downloadNode(_ node: FileNode) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = node.name
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        Task {
-            try? await session.downloadFile(remotePath: node.path, localURL: url)
+        .onChange(of: viewModel.session.currentPath) { _, newPath in
+            viewModel.handlePathChange(newPath)
         }
     }
 }

@@ -3,19 +3,18 @@ import SwiftUI
 import AppKit
 
 struct SessionTabBar: View {
-    @Binding var sessions: [SSHSession]
-    @Binding var activeSessionID: UUID?
+    let coordinator: SessionCoordinator
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
-                ForEach(sessions) { session in
+                ForEach(coordinator.sessions) { session in
                     SessionTab(
                         name: session.connection.name,
                         isConnected: session.isConnected,
-                        isSelected: session.id == activeSessionID,
-                        onSelect: { activeSessionID = session.id },
-                        onClose: { closeSession(session) }
+                        isSelected: session.id == coordinator.activeSessionID,
+                        onSelect: { coordinator.activeSessionID = session.id },
+                        onClose: { coordinator.closeSession(session) }
                     )
                 }
             }
@@ -23,14 +22,6 @@ struct SessionTabBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color(white: 0.08))
-    }
-
-    private func closeSession(_ session: SSHSession) {
-        Task { await session.disconnect() }
-        sessions.removeAll { $0.id == session.id }
-        if activeSessionID == session.id {
-            activeSessionID = sessions.first?.id
-        }
     }
 }
 
