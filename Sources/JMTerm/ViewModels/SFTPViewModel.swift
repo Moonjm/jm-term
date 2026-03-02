@@ -102,10 +102,11 @@ final class SFTPViewModel {
     func commitRename() {
         guard let node = renamingNode else { return }
         let newName = renamingName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !newName.isEmpty, newName != node.name, !newName.contains("/") else {
+        if newName == node.name {
             renamingNode = nil
             return
         }
+        guard !newName.isEmpty, !newName.contains("/") else { return }
         let parentURL = URL(fileURLWithPath: node.path).deletingLastPathComponent()
         let newPath = parentURL.appendingPathComponent(newName).path
         Task {
