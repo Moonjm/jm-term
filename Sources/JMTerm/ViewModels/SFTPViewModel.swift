@@ -108,10 +108,10 @@ final class SFTPViewModel {
         }
         let parentURL = URL(fileURLWithPath: node.path).deletingLastPathComponent()
         let newPath = parentURL.appendingPathComponent(newName).path
-        renamingNode = nil
         Task {
             do {
                 try await session.sftpService.renameItem(oldPath: node.path, newPath: newPath)
+                renamingNode = nil
                 await loadDirectory()
             } catch {
                 errorMessage = "이름 변경 실패: \(error.localizedDescription)"
