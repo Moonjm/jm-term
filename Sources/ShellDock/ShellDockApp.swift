@@ -161,8 +161,14 @@ struct ContentView: View {
             EditConnectionView(connectionStore: connectionStore, connection: conn)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            for session in sessions {
-                Task { await session.disconnect() }
+            // Best-effort cleanup: 앱 종료 시 프로세스가 먼저 끝날 수 있음
+            let activeSessions = sessions
+            Task { @MainActor in
+                await withTaskGroup(of: Void.self) { group in
+                    for session in activeSessions {
+                        group.addTask { await session.disconnect() }
+                    }
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .sshSessionEnded)) { notification in

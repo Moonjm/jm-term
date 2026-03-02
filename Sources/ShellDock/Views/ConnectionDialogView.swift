@@ -20,21 +20,13 @@ struct ConnectionDialogView: View {
             Text("새 SSH 연결")
                 .font(.headline)
 
-            Form {
-                TextField("이름", text: $name)
-                TextField("호스트", text: $host)
-                TextField("포트", text: $port)
-                TextField("사용자", text: $username)
+            ConnectionFormView(
+                name: $name, host: $host, port: $port,
+                username: $username, password: $password,
+                useKey: $useKey, keyPath: $keyPath
+            )
 
-                Toggle("SSH 키 사용", isOn: $useKey)
-                if useKey {
-                    TextField("키 경로", text: $keyPath)
-                } else {
-                    SecureField("비밀번호", text: $password)
-                }
-
-                Toggle("연결 정보 저장", isOn: $saveConnection)
-            }
+            Toggle("연결 정보 저장", isOn: $saveConnection)
 
             HStack {
                 Button("취소") { dismiss() }
