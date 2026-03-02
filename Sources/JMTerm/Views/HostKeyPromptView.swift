@@ -102,6 +102,11 @@ struct HostKeyPromptView: View {
             }
             .keyboardShortcut(.cancelAction)
 
+            Button("한 번만 허용") {
+                onResult(.acceptOnce)
+                dismiss()
+            }
+
             Button("새 키로 업데이트") {
                 onResult(.acceptAndSave)
                 dismiss()

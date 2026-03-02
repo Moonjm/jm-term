@@ -168,8 +168,9 @@ struct SFTPSidebarView: View {
 
     private func cdInTerminal(_ path: String) {
         session.currentPath = path
-        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
-        session.sendToShell(Data("cd '\(escaped)'\n".utf8))
+        let encoded = Data(path.utf8).base64EncodedString()
+        let command = "cd \"$(echo '\(encoded)' | base64 -d)\"\n"
+        session.sendToShell(Data(command.utf8))
     }
 
     private func dragProvider(for node: FileNode) -> NSItemProvider {

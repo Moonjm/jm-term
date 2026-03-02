@@ -15,11 +15,35 @@ struct KnownHostsManager {
         NSString(string: "~/.ssh/known_hosts").expandingTildeInPath
     }
 
+    // MARK: - Cache
+
+    nonisolated(unsafe) private static var cachedEntries: [String: Set<NIOSSHPublicKey>]?
+    nonisolated(unsafe) private static var cachedModDate: Date?
+
+    private static func fileModificationDate() -> Date? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: knownHostsPath) else {
+            return nil
+        }
+        return attrs[.modificationDate] as? Date
+    }
+
+    static func invalidateCache() {
+        cachedEntries = nil
+        cachedModDate = nil
+    }
+
     // MARK: - Parse known_hosts
 
-    /// Parses plain (non-hashed) entries from known_hosts.
+    /// Parses plain (non-hashed) entries from known_hosts, with file modification time caching.
     static func parse() -> [String: Set<NIOSSHPublicKey>] {
+        let modDate = fileModificationDate()
+        if let cached = cachedEntries, let cachedMod = cachedModDate, cachedMod == modDate {
+            return cached
+        }
+
         guard let content = try? String(contentsOfFile: knownHostsPath, encoding: .utf8) else {
+            cachedEntries = [:]
+            cachedModDate = modDate
             return [:]
         }
 
@@ -38,6 +62,8 @@ struct KnownHostsManager {
             }
         }
 
+        cachedEntries = result
+        cachedModDate = modDate
         return result
     }
 
@@ -140,6 +166,8 @@ struct KnownHostsManager {
                 attributes: [.posixPermissions: 0o644]
             )
         }
+
+        invalidateCache()
     }
 
     // MARK: - Update entry (replace existing key for host)
@@ -168,13 +196,32 @@ struct KnownHostsManager {
                 continue
             }
 
-            // Check plain hostname match
-            if !trimmed.hasPrefix("|") {
-                let hostField = String(trimmed.split(separator: " ", maxSplits: 1).first ?? "")
-                let hosts = hostField.split(separator: ",").map { String($0) }
-                if hosts.contains(hostnameField) {
-                    continue // Remove this line
+            // Check hashed hostname match (|1|salt|hash format)
+            if trimmed.hasPrefix("|1|") {
+                let parts = trimmed.split(separator: " ", maxSplits: 2)
+                if parts.count >= 1 {
+                    let hashField = String(parts[0])
+                    let hashParts = hashField.split(separator: "|", omittingEmptySubsequences: true)
+                    if hashParts.count == 3,
+                       hashParts[0] == "1",
+                       let salt = Data(base64Encoded: String(hashParts[1])),
+                       let expectedHash = Data(base64Encoded: String(hashParts[2])) {
+                        let key = SymmetricKey(data: salt)
+                        let hmac = HMAC<Insecure.SHA1>.authenticationCode(for: Data(hostnameField.utf8), using: key)
+                        if Data(hmac) == expectedHash {
+                            continue // Remove this hashed entry
+                        }
+                    }
                 }
+                filtered.append(line)
+                continue
+            }
+
+            // Check plain hostname match
+            let hostField = String(trimmed.split(separator: " ", maxSplits: 1).first ?? "")
+            let hosts = hostField.split(separator: ",").map { String($0) }
+            if hosts.contains(hostnameField) {
+                continue // Remove this line
             }
 
             filtered.append(line)
@@ -182,6 +229,7 @@ struct KnownHostsManager {
 
         let result = filtered.joined(separator: "\n")
         try? result.write(toFile: path, atomically: true, encoding: .utf8)
+        invalidateCache()
     }
 
     // MARK: - Fingerprint
