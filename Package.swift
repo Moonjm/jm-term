@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "ShellDock",
+    name: "JMTerm",
     platforms: [
         .macOS(.v15)
     ],
@@ -13,7 +13,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "ShellDock",
+            name: "JMTerm",
             dependencies: [
                 .product(name: "Citadel", package: "Citadel"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),

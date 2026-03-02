@@ -1,4 +1,4 @@
-// Sources/ShellDock/Views/SFTPSidebarView.swift
+// Sources/JMTerm/Views/SFTPSidebarView.swift
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers

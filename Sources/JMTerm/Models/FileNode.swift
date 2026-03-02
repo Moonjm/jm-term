@@ -1,4 +1,4 @@
-// Sources/ShellDock/Models/FileNode.swift
+// Sources/JMTerm/Models/FileNode.swift
 import Foundation
 
 struct FileNode: Identifiable, Hashable, Sendable {

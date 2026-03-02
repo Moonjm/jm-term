@@ -1,4 +1,4 @@
-// Sources/ShellDock/Views/SessionTabBar.swift
+// Sources/JMTerm/Views/SessionTabBar.swift
 import SwiftUI
 import AppKit
 

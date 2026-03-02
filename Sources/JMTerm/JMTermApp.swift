@@ -1,9 +1,9 @@
-// Sources/ShellDock/ShellDockApp.swift
+// Sources/JMTerm/JMTermApp.swift
 import SwiftUI
 import AppKit
 
 @main
-struct ShellDockApp: App {
+struct JMTermApp: App {
     @State private var connectionStore = ConnectionStore()
 
     var body: some Scene {
@@ -37,6 +37,8 @@ struct ContentView: View {
     @State private var lastClickID: ServerConnection.ID?
     @State private var lastClickDate = Date.distantPast
     @State private var sidebarTab: SidebarTab = .servers
+    @State private var hostKeyPrompt: HostKeyPromptType?
+    @State private var hostKeyPromptContinuation: CheckedContinuation<Bool, Never>?
 
     private var activeSession: SSHSession? {
         sessions.first { $0.id == activeSessionID }
@@ -90,7 +92,7 @@ struct ContentView: View {
                             Image(systemName: "terminal")
                                 .font(.system(size: 64))
                                 .foregroundStyle(.gray)
-                            Text("ShellDock")
+                            Text("JMTerm")
                                 .font(.largeTitle)
                                 .foregroundStyle(.gray)
                             Text("서버를 선택하거나 새 연결을 추가하세요")
@@ -145,6 +147,7 @@ struct ContentView: View {
         .sheet(isPresented: $showPasswordPrompt) {
             PasswordPromptView(connection: pendingConnection) { password in
                 if let conn = pendingConnection {
+                    try? connectionStore.savePassword(password, for: conn)
                     startSession(conn, password: password)
                 }
                 pendingConnection = nil
@@ -159,6 +162,15 @@ struct ContentView: View {
         }
         .sheet(item: $editingConnection) { conn in
             EditConnectionView(connectionStore: connectionStore, connection: conn)
+        }
+        .sheet(item: $hostKeyPrompt) { prompt in
+            HostKeyPromptView(promptType: prompt) {
+                hostKeyPromptContinuation?.resume(returning: true)
+                hostKeyPromptContinuation = nil
+            } onReject: {
+                hostKeyPromptContinuation?.resume(returning: false)
+                hostKeyPromptContinuation = nil
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             // Best-effort cleanup: 앱 종료 시 프로세스가 먼저 끝날 수 있음
@@ -269,6 +281,12 @@ struct ContentView: View {
 
     private func startSession(_ connection: ServerConnection, password: String?) {
         let session = SSHSession(connection: connection)
+        session.hostKeyPromptHandler = { [self] promptType in
+            await withCheckedContinuation { continuation in
+                hostKeyPromptContinuation = continuation
+                hostKeyPrompt = promptType
+            }
+        }
         sessions.append(session)
         activeSessionID = session.id
 
