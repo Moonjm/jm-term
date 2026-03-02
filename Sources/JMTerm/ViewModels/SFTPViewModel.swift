@@ -87,8 +87,8 @@ final class SFTPViewModel {
 
     func cdInTerminal(_ path: String) {
         session.currentPath = path
-        let encoded = Data(path.utf8).base64EncodedString()
-        let command = "cd \"$(echo '\(encoded)' | base64 -d)\"\n"
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        let command = "cd '\(escaped)'\n"
         session.sendToShell(Data(command.utf8))
     }
 

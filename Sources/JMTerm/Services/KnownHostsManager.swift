@@ -15,10 +15,11 @@ struct KnownHostsManager {
         NSString(string: "~/.ssh/known_hosts").expandingTildeInPath
     }
 
-    // MARK: - Cache
+    // MARK: - Cache (lock-protected for thread safety)
 
-    nonisolated(unsafe) private static var cachedEntries: [String: Set<NIOSSHPublicKey>]?
-    nonisolated(unsafe) private static var cachedModDate: Date?
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var _cachedEntries: [String: Set<NIOSSHPublicKey>]?
+    nonisolated(unsafe) private static var _cachedModDate: Date?
 
     private static func fileModificationDate() -> Date? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: knownHostsPath) else {
@@ -28,22 +29,27 @@ struct KnownHostsManager {
     }
 
     static func invalidateCache() {
-        cachedEntries = nil
-        cachedModDate = nil
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        _cachedEntries = nil
+        _cachedModDate = nil
     }
 
     // MARK: - Parse known_hosts
 
     /// Parses plain (non-hashed) entries from known_hosts, with file modification time caching.
     static func parse() -> [String: Set<NIOSSHPublicKey>] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
         let modDate = fileModificationDate()
-        if let cached = cachedEntries, let cachedMod = cachedModDate, cachedMod == modDate {
+        if let cached = _cachedEntries, let cachedMod = _cachedModDate, cachedMod == modDate {
             return cached
         }
 
         guard let content = try? String(contentsOfFile: knownHostsPath, encoding: .utf8) else {
-            cachedEntries = [:]
-            cachedModDate = modDate
+            _cachedEntries = [:]
+            _cachedModDate = modDate
             return [:]
         }
 
@@ -62,8 +68,8 @@ struct KnownHostsManager {
             }
         }
 
-        cachedEntries = result
-        cachedModDate = modDate
+        _cachedEntries = result
+        _cachedModDate = modDate
         return result
     }
 

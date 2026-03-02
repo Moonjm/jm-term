@@ -63,20 +63,17 @@ final class SFTPService {
     func downloadFile(remotePath: String, localURL: URL) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
         try await sftp.withFile(filePath: remotePath, flags: .read) { file in
-            let attrs = try await file.readAttributes()
-            let fileSize = attrs.size ?? 0
-
             FileManager.default.createFile(atPath: localURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: localURL)
             defer { handle.closeFile() }
 
             var offset: UInt64 = 0
-            while offset < fileSize {
+            while true {
                 let chunk = try await file.read(from: offset, length: Self.chunkSize)
                 let data = Data(buffer: chunk)
+                if data.isEmpty { break }
                 handle.write(data)
                 offset += UInt64(data.count)
-                if data.isEmpty { break }
             }
         }
     }
