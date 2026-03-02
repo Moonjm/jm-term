@@ -15,36 +15,10 @@ struct ConnectionDialogView: View {
     @State private var keyPath = "~/.ssh/id_ed25519"
     @State private var saveConnection = true
 
-    @State private var selectedSaved: ServerConnection?
-
     var body: some View {
         VStack(spacing: 16) {
-            Text("SSH 연결")
+            Text("새 SSH 연결")
                 .font(.headline)
-
-            if !connectionStore.connections.isEmpty {
-                Picker("저장된 서버", selection: $selectedSaved) {
-                    Text("새 연결").tag(nil as ServerConnection?)
-                    ForEach(connectionStore.connections) { conn in
-                        Text(conn.name).tag(conn as ServerConnection?)
-                    }
-                }
-                .onChange(of: selectedSaved) { _, conn in
-                    if let conn {
-                        name = conn.name
-                        host = conn.host
-                        port = String(conn.port)
-                        username = conn.username
-                        if case .publicKey(let path) = conn.authMethod {
-                            useKey = true
-                            keyPath = path
-                        } else {
-                            useKey = false
-                        }
-                        password = connectionStore.loadPassword(for: conn) ?? ""
-                    }
-                }
-            }
 
             Form {
                 TextField("이름", text: $name)
