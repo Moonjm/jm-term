@@ -1,4 +1,4 @@
-// Sources/ShellDock/Services/SSHSessionManager.swift
+// Sources/JMTerm/Services/SSHSessionManager.swift
 import Foundation
 import Citadel
 import NIOCore
@@ -26,6 +26,10 @@ struct ServerStats {
     var netTxSpeed: UInt64 = 0     // bytes/sec
 }
 
+/// Callback type for host key verification UI.
+/// Returns `true` if user accepts the key, `false` to reject.
+typealias HostKeyPromptHandler = @MainActor (HostKeyPromptType) async -> Bool
+
 @MainActor
 @Observable
 final class SSHSession: Identifiable {
@@ -36,6 +40,9 @@ final class SSHSession: Identifiable {
     var statusMessage = "연결 대기 중"
     var currentPath = "/"
     var stats: ServerStats?
+
+    /// Set this before calling connect() to enable host key verification UI.
+    var hostKeyPromptHandler: HostKeyPromptHandler?
 
     // These properties hold non-Sendable types from Citadel.
     // They are only accessed on @MainActor. We use UncheckedSendableBox
@@ -70,6 +77,8 @@ final class SSHSession: Identifiable {
             )
         }
 
+        let hostKeyValidator = buildHostKeyValidator()
+
         var sshClient: SSHClient?
         var lastError: Error?
         for attempt in 1...3 {
@@ -78,8 +87,7 @@ final class SSHSession: Identifiable {
                     host: connection.host,
                     port: connection.port,
                     authenticationMethod: authMethod,
-                    // TODO: known_hosts 기반 호스트 키 검증 구현 (MITM 방지)
-                    hostKeyValidator: .acceptAnything(),
+                    hostKeyValidator: hostKeyValidator,
                     reconnect: .never
                 )
                 break
@@ -96,6 +104,34 @@ final class SSHSession: Identifiable {
         self.client = sshClient
         isConnected = true
         statusMessage = "연결됨: \(connection.username)@\(connection.host):\(connection.port)"
+    }
+
+    private func buildHostKeyValidator() -> SSHHostKeyValidator {
+        let host = connection.host
+        let port = connection.port
+        let promptHandler = hostKeyPromptHandler
+
+        let status = KnownHostsManager.lookup(host: host, port: port)
+
+        switch status {
+        case .trusted(let knownKeys):
+            // Use .custom to detect key mismatch (server key not in known set)
+            let validator = HostKeyValidationDelegate(
+                knownKeys: knownKeys,
+                host: host,
+                port: port,
+                promptHandler: promptHandler
+            )
+            return .custom(validator)
+        case .unknown:
+            let validator = HostKeyValidationDelegate(
+                knownKeys: nil,
+                host: host,
+                port: port,
+                promptHandler: promptHandler
+            )
+            return .custom(validator)
+        }
     }
 
     func startShell() async throws {
@@ -367,6 +403,67 @@ final class SSHSession: Identifiable {
     }
 }
 
+// MARK: - Host Key Validation Delegate
+
+/// Custom NIOSSHClientServerAuthenticationDelegate that validates host keys
+/// against known_hosts and prompts the user for unknown/mismatched keys.
+private final class HostKeyValidationDelegate: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+    let knownKeys: Set<NIOSSHPublicKey>?
+    let host: String
+    let port: Int
+    let promptHandler: HostKeyPromptHandler?
+
+    init(knownKeys: Set<NIOSSHPublicKey>?, host: String, port: Int, promptHandler: HostKeyPromptHandler?) {
+        self.knownKeys = knownKeys
+        self.host = host
+        self.port = port
+        self.promptHandler = promptHandler
+    }
+
+    func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+        let host = self.host
+        let port = self.port
+        let knownKeys = self.knownKeys
+        let promptHandler = self.promptHandler
+
+        if let knownKeys, knownKeys.contains(hostKey) {
+            validationCompletePromise.succeed(())
+            return
+        }
+
+        // Compute fingerprints outside MainActor boundary to avoid sendability issues
+        let newFingerprint = KnownHostsManager.fingerprint(of: hostKey)
+        let isUnknown = knownKeys == nil
+        let promptType: HostKeyPromptType
+        if let knownKeys, !knownKeys.isEmpty {
+            let oldFingerprint = KnownHostsManager.fingerprint(of: knownKeys.first!)
+            promptType = .mismatch(host: host, oldFingerprint: oldFingerprint, newFingerprint: newFingerprint)
+        } else {
+            promptType = .unknown(host: host, fingerprint: newFingerprint)
+        }
+
+        // Serialize hostKey to string for safe cross-isolation transfer
+        let hostKeyString = String(openSSHPublicKey: hostKey)
+
+        Task { @MainActor in
+            guard let promptHandler else {
+                validationCompletePromise.fail(SSHSessionError.hostKeyRejected)
+                return
+            }
+
+            let accepted = await promptHandler(promptType)
+            if accepted {
+                if isUnknown, let savedKey = try? NIOSSHPublicKey(openSSHPublicKey: hostKeyString) {
+                    KnownHostsManager.addEntry(host: host, port: port, key: savedKey)
+                }
+                validationCompletePromise.succeed(())
+            } else {
+                validationCompletePromise.fail(SSHSessionError.hostKeyRejected)
+            }
+        }
+    }
+}
+
 extension Notification.Name {
     static let sshSessionEnded = Notification.Name("sshSessionEnded")
 }
@@ -378,6 +475,7 @@ enum SSHSessionError: Error, LocalizedError {
     case notConnected
     case unsupportedKeyType(String)
     case invalidKeyFormat
+    case hostKeyRejected
 
     var errorDescription: String? {
         switch self {
@@ -385,6 +483,7 @@ enum SSHSessionError: Error, LocalizedError {
         case .notConnected: "SSH 연결이 없습니다"
         case .unsupportedKeyType(let type): "지원하지 않는 키 유형: \(type)"
         case .invalidKeyFormat: "잘못된 키 형식입니다"
+        case .hostKeyRejected: "호스트 키가 거부되었습니다"
         }
     }
 }

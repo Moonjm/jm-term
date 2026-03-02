@@ -1,4 +1,4 @@
-// Sources/ShellDock/Views/TerminalViewWrapper.swift
+// Sources/JMTerm/Views/TerminalViewWrapper.swift
 import SwiftUI
 import SwiftTerm
 import AppKit

@@ -1,4 +1,4 @@
-// Sources/ShellDock/Services/KeychainManager.swift
+// Sources/JMTerm/Services/KeychainManager.swift
 import Foundation
 import Security
 
@@ -9,8 +9,7 @@ enum KeychainError: Error {
 }
 
 struct KeychainManager {
-    static let service = "com.shelldock.ssh"
-
+    static let service = "com.jmterm.ssh"
     static func save(password: String, for account: String) throws {
         guard let data = password.data(using: .utf8) else { return }
 

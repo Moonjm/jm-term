@@ -1,4 +1,4 @@
-// Sources/ShellDock/Services/ConnectionStore.swift
+// Sources/JMTerm/Services/ConnectionStore.swift
 import Foundation
 import SwiftUI
 
@@ -10,7 +10,7 @@ final class ConnectionStore {
 
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("ShellDock", isDirectory: true)
+        let appDir = appSupport.appendingPathComponent("JMTerm", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         self.fileURL = appDir.appendingPathComponent("connections.json")
         load()

@@ -1,4 +1,4 @@
-// Sources/ShellDock/Models/ServerConnection.swift
+// Sources/JMTerm/Models/ServerConnection.swift
 import Foundation
 
 enum AuthMethod: Codable, Hashable, Sendable {

@@ -1,4 +1,4 @@
-// Sources/ShellDock/Views/ConnectionFormView.swift
+// Sources/JMTerm/Views/ConnectionFormView.swift
 import SwiftUI
 
 struct ConnectionFormView: View {
