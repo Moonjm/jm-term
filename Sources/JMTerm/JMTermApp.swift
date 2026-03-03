@@ -14,6 +14,10 @@ struct JMTermApp: App {
                 .onAppear {
                     NSApp.setActivationPolicy(.regular)
                     NSApp.activate(ignoringOtherApps: true)
+                    if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
+                       let icon = NSImage(contentsOf: iconURL) {
+                        NSApp.applicationIconImage = icon
+                    }
                 }
         }
         .defaultSize(width: 1200, height: 800)

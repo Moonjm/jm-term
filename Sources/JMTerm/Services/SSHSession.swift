@@ -5,6 +5,7 @@ import NIOCore
 import NIOSSH
 import Crypto
 import SwiftTerm
+import OSLog
 
 // MARK: - Sendable wrapper for non-Sendable SSH types
 
@@ -170,9 +171,18 @@ final class SSHSession: Identifiable {
                         NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
                     }
                 }
-            } catch {
+            } catch is CancellationError {
                 await MainActor.run {
+                    sessionBox.value.isConnected = false
+                    sessionBox.value.statusMessage = "연결 종료됨"
+                    NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
+                }
+            } catch {
+                Logger.app.error("셸 오류: \(error)")
+                await MainActor.run {
+                    sessionBox.value.isConnected = false
                     sessionBox.value.statusMessage = "셸 오류: \(error.localizedDescription)"
+                    NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
                 }
             }
         }

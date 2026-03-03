@@ -17,6 +17,9 @@ let package = Package(
             dependencies: [
                 .product(name: "Citadel", package: "Citadel"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ],
+            resources: [
+                .copy("Resources/AppIcon.icns"),
             ]
         ),
     ]

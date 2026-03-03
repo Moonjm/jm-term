@@ -45,6 +45,7 @@ struct TerminalViewWrapper: NSViewRepresentable {
         container.coordinator = context.coordinator
         context.coordinator.terminalView = terminalView
         context.coordinator.session = session
+        context.coordinator.installKeyMonitor()
         session.terminalView = terminalView
 
         Task { @MainActor in
@@ -66,6 +67,10 @@ struct TerminalViewWrapper: NSViewRepresentable {
         }
 
         return container
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.removeKeyMonitor()
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
@@ -162,6 +167,49 @@ struct TerminalViewWrapper: NSViewRepresentable {
     final class Coordinator: NSObject, TerminalViewDelegate, @unchecked Sendable {
         @MainActor var session: SSHSession?
         var terminalView: TerminalView?
+        nonisolated(unsafe) private var keyMonitor: Any?
+
+        func installKeyMonitor() {
+            guard keyMonitor == nil else { return }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let tv = self.terminalView,
+                      tv.window?.firstResponder === tv else { return event }
+
+                let keyCode = event.keyCode
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+                // Home or Cmd+Left → ESC [ H (xterm Home)
+                if keyCode == 115 || (keyCode == 123 && flags.contains(.command)) {
+                    MainActor.assumeIsolated {
+                        self.session?.sendToShell(Data([0x1b, 0x5b, 0x48]))
+                    }
+                    return nil
+                }
+
+                // End or Cmd+Right → ESC [ F (xterm End)
+                if keyCode == 119 || (keyCode == 124 && flags.contains(.command)) {
+                    MainActor.assumeIsolated {
+                        self.session?.sendToShell(Data([0x1b, 0x5b, 0x46]))
+                    }
+                    return nil
+                }
+
+                return event
+            }
+        }
+
+        func removeKeyMonitor() {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+                self.keyMonitor = nil
+            }
+        }
+
+        deinit {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+            }
+        }
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             MainActor.assumeIsolated {
