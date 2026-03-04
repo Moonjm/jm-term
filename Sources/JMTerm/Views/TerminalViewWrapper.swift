@@ -13,23 +13,6 @@ private class PaddedContainerView: NSView {
         terminalView.frame = bounds.insetBy(dx: inset, dy: inset)
     }
 
-    override func scrollWheel(with event: NSEvent) {
-        guard let coordinator, let tv = coordinator.terminalView else {
-            super.scrollWheel(with: event)
-            return
-        }
-        let deltaY = event.deltaY
-        guard deltaY != 0 else { super.scrollWheel(with: event); return }
-        guard tv.getTerminal().isCurrentBufferAlternate else {
-            super.scrollWheel(with: event)
-            return
-        }
-        let lines = max(1, Int(abs(deltaY)))
-        let arrow: [UInt8] = deltaY > 0 ? [0x1b, 0x5b, 0x41] : [0x1b, 0x5b, 0x42]
-        for _ in 0..<lines {
-            coordinator.session?.sendToShell(Data(arrow))
-        }
-    }
 }
 
 struct TerminalViewWrapper: NSViewRepresentable {
@@ -46,6 +29,7 @@ struct TerminalViewWrapper: NSViewRepresentable {
         context.coordinator.terminalView = terminalView
         context.coordinator.session = session
         context.coordinator.installKeyMonitor()
+        context.coordinator.installScrollMonitor()
         session.terminalView = terminalView
 
         Task { @MainActor in
@@ -168,6 +152,7 @@ struct TerminalViewWrapper: NSViewRepresentable {
         @MainActor var session: SSHSession?
         var terminalView: TerminalView?
         nonisolated(unsafe) private var keyMonitor: Any?
+        nonisolated(unsafe) private var scrollMonitor: Any?
 
         func installKeyMonitor() {
             guard keyMonitor == nil else { return }
@@ -198,16 +183,45 @@ struct TerminalViewWrapper: NSViewRepresentable {
             }
         }
 
+        func installScrollMonitor() {
+            guard scrollMonitor == nil else { return }
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let tv = self.terminalView,
+                      tv.window?.firstResponder === tv else { return event }
+                let deltaY = event.deltaY
+                guard deltaY != 0 else { return event }
+                let isAlternate = MainActor.assumeIsolated {
+                    tv.getTerminal().isCurrentBufferAlternate
+                }
+                guard isAlternate else { return event }
+                let lines = max(1, Int(abs(deltaY)))
+                let arrow: [UInt8] = deltaY > 0 ? [0x1b, 0x5b, 0x41] : [0x1b, 0x5b, 0x42]
+                MainActor.assumeIsolated {
+                    for _ in 0..<lines {
+                        self.session?.sendToShell(Data(arrow))
+                    }
+                }
+                return nil
+            }
+        }
+
         func removeKeyMonitor() {
             if let keyMonitor {
                 NSEvent.removeMonitor(keyMonitor)
                 self.keyMonitor = nil
+            }
+            if let scrollMonitor {
+                NSEvent.removeMonitor(scrollMonitor)
+                self.scrollMonitor = nil
             }
         }
 
         deinit {
             if let keyMonitor {
                 NSEvent.removeMonitor(keyMonitor)
+            }
+            if let scrollMonitor {
+                NSEvent.removeMonitor(scrollMonitor)
             }
         }
 

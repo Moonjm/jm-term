@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-APP_NAME="ShellDock"
+APP_NAME="JMTerm"
 BUILD_DIR=".build/release"
 APP_DIR="${APP_NAME}.app/Contents"
 
@@ -15,6 +15,11 @@ mkdir -p "${APP_DIR}/Resources"
 
 cp "${BUILD_DIR}/${APP_NAME}" "${APP_DIR}/MacOS/"
 cp "Info.plist" "${APP_DIR}/"
+cp "Sources/JMTerm/Resources/AppIcon.icns" "${APP_DIR}/Resources/"
 
-echo "Done! ${APP_NAME}.app created."
-echo "Run: open ${APP_NAME}.app"
+echo "Installing to /Applications..."
+rm -rf "/Applications/${APP_NAME}.app"
+cp -R "${APP_NAME}.app" "/Applications/${APP_NAME}.app"
+
+echo "Done! Installed to /Applications/${APP_NAME}.app"
+echo "Run: open /Applications/${APP_NAME}.app"

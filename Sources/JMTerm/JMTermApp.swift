@@ -123,6 +123,8 @@ struct ContentView: View {
                     Text("연결 없음")
                 }
                 Spacer()
+                Text("build \(BuildInfo.version)")
+                    .foregroundStyle(Color(white: 0.35))
             }
             .font(.caption)
             .foregroundStyle(Color(white: 0.6))
