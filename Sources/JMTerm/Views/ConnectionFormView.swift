@@ -10,7 +10,14 @@ struct ConnectionFormView: View {
     @Binding var useKey: Bool
     @Binding var keyPath: String
 
-    @State private var testState: TestConnectionState = .idle
+    @State private var testState: TestState = .idle
+
+    private enum TestState: Equatable {
+        case idle
+        case testing
+        case success
+        case failure(String)
+    }
 
     private var canTest: Bool {
         !host.isEmpty && !username.isEmpty && (useKey || !password.isEmpty)
@@ -68,6 +75,12 @@ struct ConnectionFormView: View {
                 }
             }
         }
+        .onChange(of: host) { testState = .idle }
+        .onChange(of: port) { testState = .idle }
+        .onChange(of: username) { testState = .idle }
+        .onChange(of: password) { testState = .idle }
+        .onChange(of: useKey) { testState = .idle }
+        .onChange(of: keyPath) { testState = .idle }
     }
 
     private func testConnection() {
@@ -87,19 +100,8 @@ struct ConnectionFormView: View {
                 try await SSHSession.testConnection(connection, password: pwd)
                 testState = .success
             } catch {
-                let message = String(describing: error)
-                // localizedDescription이 불분명할 경우 원본 에러 표시
-                let display = error.localizedDescription.contains("error")
-                    ? message : error.localizedDescription
-                testState = .failure(display)
+                testState = .failure(error.localizedDescription)
             }
         }
     }
-}
-
-enum TestConnectionState: Equatable {
-    case idle
-    case testing
-    case success
-    case failure(String)
 }

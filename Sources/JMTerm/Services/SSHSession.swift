@@ -19,6 +19,42 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 /// Callback type for host key verification UI.
 typealias HostKeyPromptHandler = @MainActor (HostKeyPromptType) async -> HostKeyPromptResult
 
+/// Thread-safe one-shot resolver for async result passing across isolation boundaries.
+private final class OnceResolver: Sendable {
+    private let state = ManagedCriticalState<(resolved: Bool, continuation: CheckedContinuation<Void, Error>?)>(
+        (resolved: false, continuation: nil)
+    )
+
+    func resolve(with result: Result<Void, Error>) {
+        state.withLock { s in
+            guard !s.resolved else { return }
+            s.resolved = true
+            s.continuation?.resume(with: result)
+        }
+    }
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            state.withLock { s in
+                if s.resolved { return }
+                s.continuation = continuation
+            }
+        }
+    }
+}
+
+/// Minimal lock-based critical state for Sendable conformance.
+private final class ManagedCriticalState<State>: @unchecked Sendable {
+    private var state: State
+    private let lock = NSLock()
+    init(_ state: State) { self.state = state }
+    func withLock<R>(_ body: (inout State) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&state)
+    }
+}
+
 @MainActor
 @Observable
 final class SSHSession: Identifiable {
@@ -49,23 +85,27 @@ final class SSHSession: Identifiable {
         self.connection = connection
     }
 
-    func connect(password: String?) async throws {
-        statusMessage = "연결 중..."
-
-        let authMethod: SSHAuthenticationMethod
+    private nonisolated static func resolveAuthMethod(
+        _ connection: ServerConnection, password: String?
+    ) throws -> SSHAuthenticationMethod {
         switch connection.authMethod {
         case .password:
             guard let password else { throw SSHSessionError.passwordRequired }
-            authMethod = .passwordBased(username: connection.username, password: password)
+            return .passwordBased(username: connection.username, password: password)
         case .publicKey(let path):
             let expandedPath = NSString(string: path).expandingTildeInPath
             let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
-            authMethod = try SSHKeyHelper.authenticationMethod(
+            return try SSHKeyHelper.authenticationMethod(
                 fromPrivateKey: keyString,
                 username: connection.username
             )
         }
+    }
 
+    func connect(password: String?) async throws {
+        statusMessage = "연결 중..."
+
+        let authMethod = try Self.resolveAuthMethod(connection, password: password)
         let hostKeyValidator = buildHostKeyValidator()
 
         var sshClient: SSHClient?
@@ -211,32 +251,48 @@ final class SSHSession: Identifiable {
     // MARK: - Test Connection
 
     /// Tests SSH connectivity without starting a shell or keeping the connection.
-    static func testConnection(_ connection: ServerConnection, password: String?) async throws {
-        let authMethod: SSHAuthenticationMethod
-        switch connection.authMethod {
-        case .password:
-            guard let password else { throw SSHSessionError.passwordRequired }
-            authMethod = .passwordBased(username: connection.username, password: password)
-        case .publicKey(let path):
-            let expandedPath = NSString(string: path).expandingTildeInPath
-            let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
-            authMethod = try SSHKeyHelper.authenticationMethod(
-                fromPrivateKey: keyString,
-                username: connection.username
-            )
+    nonisolated static func testConnection(_ connection: ServerConnection, password: String?, timeout: Duration = .seconds(10)) async throws {
+        let authMethod = try resolveAuthMethod(connection, password: password)
+
+        // known_hosts 기반 호스트 키 검증 (프롬프트 없이 trusted만 통과, 나머지 수락)
+        let status = KnownHostsManager.lookup(host: connection.host, port: connection.port)
+        let hostKeyValidator: SSHHostKeyValidator
+        if case .trusted(let keys) = status {
+            hostKeyValidator = .trustedKeys(keys)
+        } else {
+            hostKeyValidator = .acceptAnything()
         }
 
-        let client = try await SSHClient.connect(
-            host: connection.host,
-            port: connection.port,
-            authenticationMethod: authMethod,
-            hostKeyValidator: .acceptAnything(),
-            reconnect: .never
-        )
+        let authBox = UncheckedSendableBox(value: authMethod)
+        let validatorBox = UncheckedSendableBox(value: hostKeyValidator)
+        let host = connection.host
+        let port = connection.port
+        let resolver = OnceResolver()
 
-        // 연결 성공 후 close 에러는 무시 (연결 테스트 자체는 성공)
-        let clientBox = UncheckedSendableBox(value: client)
-        try? await clientBox.value.close()
+        // 타임아웃 적용: detached task로 Sendable 제약 회피
+        let connectTask = Task.detached {
+            do {
+                let client = try await SSHClient.connect(
+                    host: host,
+                    port: port,
+                    authenticationMethod: authBox.value,
+                    hostKeyValidator: validatorBox.value,
+                    reconnect: .never
+                )
+                try? await client.close()
+                resolver.resolve(with: .success(()))
+            } catch {
+                resolver.resolve(with: .failure(error))
+            }
+        }
+
+        Task.detached {
+            try? await Task.sleep(for: timeout)
+            connectTask.cancel()
+            resolver.resolve(with: .failure(SSHSessionError.connectionTimeout))
+        }
+
+        try await resolver.wait()
     }
 
     // MARK: - Monitoring & SFTP
@@ -351,6 +407,7 @@ enum SSHSessionError: Error, LocalizedError {
     case unsupportedKeyType(String)
     case invalidKeyFormat
     case hostKeyRejected
+    case connectionTimeout
 
     var errorDescription: String? {
         switch self {
@@ -359,6 +416,7 @@ enum SSHSessionError: Error, LocalizedError {
         case .unsupportedKeyType(let type): "지원하지 않는 키 유형: \(type)"
         case .invalidKeyFormat: "잘못된 키 형식입니다"
         case .hostKeyRejected: "호스트 키가 거부되었습니다"
+        case .connectionTimeout: "연결 시간이 초과되었습니다"
         }
     }
 }
