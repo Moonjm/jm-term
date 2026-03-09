@@ -208,6 +208,37 @@ final class SSHSession: Identifiable {
         }
     }
 
+    // MARK: - Test Connection
+
+    /// Tests SSH connectivity without starting a shell or keeping the connection.
+    static func testConnection(_ connection: ServerConnection, password: String?) async throws {
+        let authMethod: SSHAuthenticationMethod
+        switch connection.authMethod {
+        case .password:
+            guard let password else { throw SSHSessionError.passwordRequired }
+            authMethod = .passwordBased(username: connection.username, password: password)
+        case .publicKey(let path):
+            let expandedPath = NSString(string: path).expandingTildeInPath
+            let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
+            authMethod = try SSHKeyHelper.authenticationMethod(
+                fromPrivateKey: keyString,
+                username: connection.username
+            )
+        }
+
+        let client = try await SSHClient.connect(
+            host: connection.host,
+            port: connection.port,
+            authenticationMethod: authMethod,
+            hostKeyValidator: .acceptAnything(),
+            reconnect: .never
+        )
+
+        // 연결 성공 후 close 에러는 무시 (연결 테스트 자체는 성공)
+        let clientBox = UncheckedSendableBox(value: client)
+        try? await clientBox.value.close()
+    }
+
     // MARK: - Monitoring & SFTP
 
     func startMonitoring() {
