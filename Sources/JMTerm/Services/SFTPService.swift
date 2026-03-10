@@ -76,8 +76,11 @@ final class SFTPService {
         }
     }
 
+    var isTransferring: Bool { transferProgress != nil }
+
     func downloadFile(remotePath: String, localURL: URL) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
+        guard !isTransferring else { return }
 
         let fileName = (remotePath as NSString).lastPathComponent
         var totalSize: Int64 = 0
@@ -115,10 +118,16 @@ final class SFTPService {
 
     func uploadFile(localURL: URL, remotePath: String) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
+        guard !isTransferring else { return }
 
         let fileName = localURL.lastPathComponent
         let fileAttrs = try FileManager.default.attributesOfItem(atPath: localURL.path)
-        let totalSize = Int64((fileAttrs[.size] as? Int) ?? 0)
+        let totalSize: Int64
+        if let size = fileAttrs[.size] as? UInt64 {
+            totalSize = Int64(size)
+        } else {
+            totalSize = 0
+        }
         transferProgress = TransferProgress(
             fileName: fileName, isUpload: true,
             bytesTransferred: 0, totalBytes: totalSize

@@ -142,8 +142,13 @@ struct TransferProgressBar: View {
                         .truncationMode(.middle)
                         .frame(maxWidth: 80)
 
-                    ProgressView(value: progress.fraction)
-                        .progressViewStyle(.linear)
+                    if progress.totalBytes > 0 {
+                        ProgressView(value: progress.fraction)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
 
                     Text("\(progress.percent)%")
                         .font(.caption2)
