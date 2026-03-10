@@ -11,106 +11,149 @@ struct SFTPSidebarView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // 경로 바 (편집 가능)
-            HStack(spacing: 6) {
-                Image(systemName: "folder")
-                    .foregroundStyle(.secondary)
-
-                TextField("경로", text: $viewModel.editingPath)
-                    .textFieldStyle(.plain)
-                    .font(.caption)
-                    .onSubmit {
-                        viewModel.navigateTo(viewModel.editingPath)
-                    }
-
-                Button(action: { Task { await viewModel.loadDirectory() } }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .help("새로고침")
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color(white: 0.12))
-
-            Divider()
-
-            // 파일 목록
-            if viewModel.isLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error = viewModel.errorMessage {
-                VStack {
-                    Spacer()
-                    Text(error)
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                // 경로 바 (편집 가능)
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
                         .foregroundStyle(.secondary)
+
+                    TextField("경로", text: $viewModel.editingPath)
+                        .textFieldStyle(.plain)
                         .font(.caption)
-                        .padding()
-                    Button("다시 시도") { Task { await viewModel.loadDirectory() } }
-                    Spacer()
+                        .onSubmit {
+                            viewModel.navigateTo(viewModel.editingPath)
+                        }
+
+                    Button(action: { Task { await viewModel.loadDirectory() } }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .help("새로고침")
                 }
-            } else if viewModel.items.isEmpty {
-                VStack {
-                    Spacer()
-                    Text("빈 디렉토리")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(viewModel.items) { node in
-                            Button {
-                                viewModel.handleFileClick(node)
-                            } label: {
-                                if viewModel.renamingNode?.id == node.id {
-                                    RenameRow(node: node, name: $viewModel.renamingName) {
-                                        viewModel.commitRename()
-                                    } onCancel: {
-                                        viewModel.cancelRename()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color(white: 0.12))
+
+                Divider()
+
+                // 파일 목록
+                Group {
+                    if viewModel.isLoading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if let error = viewModel.errorMessage {
+                        VStack {
+                            Spacer()
+                            Text(error)
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                                .padding()
+                            Button("다시 시도") { Task { await viewModel.loadDirectory() } }
+                            Spacer()
+                        }
+                    } else if viewModel.items.isEmpty {
+                        VStack {
+                            Spacer()
+                            Text("빈 디렉토리")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(viewModel.items) { node in
+                                    Button {
+                                        viewModel.handleFileClick(node)
+                                    } label: {
+                                        if viewModel.renamingNode?.id == node.id {
+                                            RenameRow(node: node, name: $viewModel.renamingName) {
+                                                viewModel.commitRename()
+                                            } onCancel: {
+                                                viewModel.cancelRename()
+                                            }
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        } else {
+                                            FileItemRow(node: node)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                } else {
-                                    FileItemRow(node: node)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    .buttonStyle(.plain)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(viewModel.selectedID == node.id ? Color.accentColor.opacity(0.25) : Color.clear)
+                                    )
+                                    .overlay(
+                                        FileContextMenu(node: node, viewModel: viewModel)
+                                    )
+                                    .onDrag {
+                                        viewModel.dragProvider(for: node)
+                                    }
                                 }
                             }
-                            .buttonStyle(.plain)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(viewModel.selectedID == node.id ? Color.accentColor.opacity(0.25) : Color.clear)
-                            )
-                            .overlay(
-                                FileContextMenu(node: node, viewModel: viewModel)
-                            )
-                            .onDrag {
-                                viewModel.dragProvider(for: node)
+                            .padding(4)
+                        }
+                        .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
+                            viewModel.handleDrop(providers)
+                            return true
+                        }
+                        .border(viewModel.isDropTargeted ? Color.accentColor : Color.clear, width: 2)
+                        .contextMenu {
+                            Button("새로고침") {
+                                Task { await viewModel.loadDirectory() }
                             }
                         }
                     }
-                    .padding(4)
                 }
-                .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
-                    viewModel.handleDrop(providers)
-                    return true
-                }
-                .border(viewModel.isDropTargeted ? Color.accentColor : Color.clear, width: 2)
-                .contextMenu {
-                    Button("새로고침") {
-                        Task { await viewModel.loadDirectory() }
-                    }
-                }
+                .frame(maxHeight: .infinity)
+                .clipped()
             }
 
+            TransferProgressBar(sftpService: viewModel.session.sftpService)
         }
         .task {
             await viewModel.initialLoad()
         }
         .onChange(of: viewModel.session.currentPath) { _, newPath in
             viewModel.handlePathChange(newPath)
+        }
+    }
+}
+
+// MARK: - Transfer Progress Bar
+
+struct TransferProgressBar: View {
+    let sftpService: SFTPService
+
+    var body: some View {
+        if let progress = sftpService.transferProgress {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: progress.isUpload ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
+                        .foregroundStyle(progress.isUpload ? .green : .blue)
+                        .font(.caption)
+
+                    Text(progress.fileName)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 80)
+
+                    ProgressView(value: progress.fraction)
+                        .progressViewStyle(.linear)
+
+                    Text("\(progress.percent)%")
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .frame(width: 32, alignment: .trailing)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color(white: 0.12))
+            }
         }
     }
 }

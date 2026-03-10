@@ -4,11 +4,27 @@ import Citadel
 import NIOCore
 import SwiftTerm
 
+struct TransferProgress {
+    let fileName: String
+    let isUpload: Bool
+    var bytesTransferred: Int64
+    var totalBytes: Int64
+
+    var fraction: Double {
+        totalBytes > 0 ? Double(bytesTransferred) / Double(totalBytes) : 0
+    }
+
+    var percent: Int {
+        Int(fraction * 100)
+    }
+}
+
 @MainActor
 @Observable
 final class SFTPService {
     var isSFTPReady = false
     var currentPath = "/"
+    var transferProgress: TransferProgress?
 
     private var sftpClient: SFTPClient?
     nonisolated private static let chunkSize: UInt32 = 1024 * 1024 // 1MB chunks
@@ -62,7 +78,19 @@ final class SFTPService {
 
     func downloadFile(remotePath: String, localURL: URL) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
-        try await sftp.withFile(filePath: remotePath, flags: .read) { file in
+
+        let fileName = (remotePath as NSString).lastPathComponent
+        var totalSize: Int64 = 0
+        if let attrs = try? await sftp.getAttributes(at: remotePath) {
+            totalSize = Int64(attrs.size ?? 0)
+        }
+        transferProgress = TransferProgress(
+            fileName: fileName, isUpload: false,
+            bytesTransferred: 0, totalBytes: totalSize
+        )
+
+        let file = try await sftp.openFile(filePath: remotePath, flags: .read)
+        do {
             FileManager.default.createFile(atPath: localURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: localURL)
             defer { handle.closeFile() }
@@ -74,24 +102,48 @@ final class SFTPService {
                 if data.isEmpty { break }
                 handle.write(data)
                 offset += UInt64(data.count)
+                transferProgress?.bytesTransferred = Int64(offset)
             }
+            try await file.close()
+        } catch {
+            try? await file.close()
+            transferProgress = nil
+            throw error
         }
+        transferProgress = nil
     }
 
     func uploadFile(localURL: URL, remotePath: String) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
-        let handle = try FileHandle(forReadingFrom: localURL)
-        defer { handle.closeFile() }
 
-        try await sftp.withFile(filePath: remotePath, flags: [.write, .create, .truncate]) { file in
+        let fileName = localURL.lastPathComponent
+        let fileAttrs = try FileManager.default.attributesOfItem(atPath: localURL.path)
+        let totalSize = Int64((fileAttrs[.size] as? Int) ?? 0)
+        transferProgress = TransferProgress(
+            fileName: fileName, isUpload: true,
+            bytesTransferred: 0, totalBytes: totalSize
+        )
+
+        let localHandle = try FileHandle(forReadingFrom: localURL)
+        defer { localHandle.closeFile() }
+
+        let file = try await sftp.openFile(filePath: remotePath, flags: [.write, .create, .truncate])
+        do {
             var offset: UInt64 = 0
             while true {
-                let data = handle.readData(ofLength: Int(Self.chunkSize))
+                let data = localHandle.readData(ofLength: Int(Self.chunkSize))
                 if data.isEmpty { break }
                 try await file.write(ByteBuffer(data: data), at: offset)
                 offset += UInt64(data.count)
+                transferProgress?.bytesTransferred = Int64(offset)
             }
+            try await file.close()
+        } catch {
+            try? await file.close()
+            transferProgress = nil
+            throw error
         }
+        transferProgress = nil
     }
 
     func renameItem(oldPath: String, newPath: String) async throws {
