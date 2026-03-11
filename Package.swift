@@ -20,6 +20,7 @@ let package = Package(
             ],
             resources: [
                 .copy("Resources/AppIcon.icns"),
+                .copy("Resources/AppIcon.png"),
             ]
         ),
     ]

@@ -157,8 +157,9 @@ struct TerminalViewWrapper: NSViewRepresentable {
         func installKeyMonitor() {
             guard keyMonitor == nil else { return }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, let tv = self.terminalView,
-                      tv.window?.firstResponder === tv else { return event }
+                guard let self, let tv = self.terminalView else { return event }
+                let isFocused = MainActor.assumeIsolated { tv.window?.firstResponder === tv }
+                guard isFocused else { return event }
 
                 let keyCode = event.keyCode
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -186,8 +187,9 @@ struct TerminalViewWrapper: NSViewRepresentable {
         func installScrollMonitor() {
             guard scrollMonitor == nil else { return }
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, let tv = self.terminalView,
-                      tv.window?.firstResponder === tv else { return event }
+                guard let self, let tv = self.terminalView else { return event }
+                let isFocused = MainActor.assumeIsolated { tv.window?.firstResponder === tv }
+                guard isFocused else { return event }
                 let deltaY = event.deltaY
                 guard deltaY != 0 else { return event }
                 let isAlternate = MainActor.assumeIsolated {
