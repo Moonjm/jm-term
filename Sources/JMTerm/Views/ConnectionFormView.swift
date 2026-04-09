@@ -33,7 +33,20 @@ struct ConnectionFormView: View {
 
                 Toggle("SSH 키 사용", isOn: $useKey)
                 if useKey {
-                    TextField("키 경로", text: $keyPath)
+                    HStack {
+                        TextField("키 경로", text: $keyPath)
+                        Button("선택...") {
+                            let panel = NSOpenPanel()
+                            panel.title = "SSH 키 파일 선택"
+                            panel.allowsMultipleSelection = false
+                            panel.canChooseDirectories = false
+                            panel.canChooseFiles = true
+                            panel.directoryURL = URL(fileURLWithPath: NSString(string: "~/.ssh").expandingTildeInPath)
+                            if panel.runModal() == .OK, let url = panel.url {
+                                keyPath = url.path
+                            }
+                        }
+                    }
                 } else {
                     SecureField("비밀번호", text: $password)
                 }

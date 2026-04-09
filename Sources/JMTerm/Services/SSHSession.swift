@@ -4,6 +4,7 @@ import Citadel
 import NIOCore
 import NIOSSH
 import Crypto
+import CCryptoBoringSSL
 import SwiftTerm
 import OSLog
 
@@ -117,7 +118,8 @@ final class SSHSession: Identifiable {
                     port: connection.port,
                     authenticationMethod: authMethod,
                     hostKeyValidator: hostKeyValidator,
-                    reconnect: .never
+                    reconnect: .never,
+                    algorithms: .all
                 )
                 break
             } catch {
@@ -277,7 +279,8 @@ final class SSHSession: Identifiable {
                     port: port,
                     authenticationMethod: authBox.value,
                     hostKeyValidator: validatorBox.value,
-                    reconnect: .never
+                    reconnect: .never,
+                    algorithms: .all
                 )
                 try? await client.close()
                 resolver.resolve(with: .success(()))
@@ -431,6 +434,15 @@ enum SSHKeyHelper {
         fromPrivateKey keyString: String,
         username: String
     ) throws -> SSHAuthenticationMethod {
+        let trimmed = keyString.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 전통 PEM 형식 (PKCS#1): -----BEGIN RSA PRIVATE KEY-----
+        if trimmed.hasPrefix("-----BEGIN RSA PRIVATE KEY-----") {
+            let (d, e, n) = try parsePEMRSAComponents(from: trimmed)
+            return .custom(RSASHA512AuthDelegate(username: username, d: d, e: e, n: n))
+        }
+
+        // OpenSSH 형식: -----BEGIN OPENSSH PRIVATE KEY-----
         let keyType = try SSHKeyDetection.detectPrivateKeyType(from: keyString)
 
         switch keyType {
@@ -438,7 +450,8 @@ enum SSHKeyHelper {
             let privateKey = try parseEd25519PrivateKey(from: keyString)
             return .ed25519(username: username, privateKey: privateKey)
         case .rsa:
-            throw SSHSessionError.unsupportedKeyType("RSA (use ed25519 keys instead)")
+            let (d, e, n) = try parseOpenSSHRSAComponents(from: keyString)
+            return .custom(RSASHA512AuthDelegate(username: username, d: d, e: e, n: n))
         case .ecdsaP256:
             let privateKey = try parseP256PrivateKey(from: keyString)
             return .p256(username: username, privateKey: privateKey)
@@ -593,5 +606,117 @@ enum SSHKeyHelper {
         let privateKeyData = try readSSHBytes(from: section, offset: &offset)
 
         return try P521.Signing.PrivateKey(rawRepresentation: privateKeyData)
+    }
+
+    // MARK: - OpenSSH RSA
+
+    /// OpenSSH 형식의 RSA 키에서 d, e, n BIGNUM을 추출합니다.
+    static func parseOpenSSHRSAComponents(from keyString: String) throws -> (d: UnsafeMutablePointer<BIGNUM>, e: UnsafeMutablePointer<BIGNUM>, n: UnsafeMutablePointer<BIGNUM>) {
+        let result = try parsePrivateSection(from: keyString)
+        let section = result.privateSection
+        var offset = result.offset
+
+        let nData = try readSSHBytes(from: section, offset: &offset)
+        let eData = try readSSHBytes(from: section, offset: &offset)
+        let dData = try readSSHBytes(from: section, offset: &offset)
+
+        let n = CCryptoBoringSSL_BN_bin2bn([UInt8](nData), nData.count, nil)!
+        let e = CCryptoBoringSSL_BN_bin2bn([UInt8](eData), eData.count, nil)!
+        let d = CCryptoBoringSSL_BN_bin2bn([UInt8](dData), dData.count, nil)!
+
+        return (d, e, n)
+    }
+
+    // MARK: - PEM RSA (PKCS#1)
+
+    /// 전통적인 PEM 형식 (-----BEGIN RSA PRIVATE KEY-----) PKCS#1 키에서 d, e, n을 추출합니다.
+    static func parsePEMRSAComponents(from keyString: String) throws -> (d: UnsafeMutablePointer<BIGNUM>, e: UnsafeMutablePointer<BIGNUM>, n: UnsafeMutablePointer<BIGNUM>) {
+        var pem = keyString.replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+
+        guard
+            pem.hasPrefix("-----BEGIN RSA PRIVATE KEY-----"),
+            pem.hasSuffix("-----END RSA PRIVATE KEY-----")
+        else {
+            throw SSHSessionError.invalidKeyFormat
+        }
+
+        pem.removeFirst("-----BEGIN RSA PRIVATE KEY-----".count)
+        pem.removeLast("-----END RSA PRIVATE KEY-----".count)
+
+        guard let derData = Data(base64Encoded: pem) else {
+            throw SSHSessionError.invalidKeyFormat
+        }
+
+        return try parsePKCS1RSAComponents(from: derData)
+    }
+
+    // MARK: - ASN.1 DER / PKCS#1 parser
+
+    private static func parsePKCS1RSAComponents(from data: Data) throws -> (d: UnsafeMutablePointer<BIGNUM>, e: UnsafeMutablePointer<BIGNUM>, n: UnsafeMutablePointer<BIGNUM>) {
+        var offset = 0
+
+        try expectASN1Tag(0x30, in: data, offset: &offset)
+        _ = try readASN1Length(from: data, offset: &offset)
+
+        let version = try readASN1Integer(from: data, offset: &offset)
+        guard version.count <= 1 else { throw SSHSessionError.invalidKeyFormat }
+
+        let n = try readASN1Integer(from: data, offset: &offset)
+        let e = try readASN1Integer(from: data, offset: &offset)
+        let d = try readASN1Integer(from: data, offset: &offset)
+
+        let nBN = CCryptoBoringSSL_BN_bin2bn([UInt8](n), n.count, nil)!
+        let eBN = CCryptoBoringSSL_BN_bin2bn([UInt8](e), e.count, nil)!
+        let dBN = CCryptoBoringSSL_BN_bin2bn([UInt8](d), d.count, nil)!
+
+        return (dBN, eBN, nBN)
+    }
+
+    private static func expectASN1Tag(_ tag: UInt8, in data: Data, offset: inout Int) throws {
+        guard offset < data.count, data[offset] == tag else {
+            throw SSHSessionError.invalidKeyFormat
+        }
+        offset += 1
+    }
+
+    /// ASN.1 DER 길이 필드를 읽습니다.
+    private static func readASN1Length(from data: Data, offset: inout Int) throws -> Int {
+        guard offset < data.count else { throw SSHSessionError.invalidKeyFormat }
+        let first = data[offset]
+        offset += 1
+
+        if first < 0x80 {
+            return Int(first)
+        }
+
+        let numBytes = Int(first & 0x7F)
+        guard numBytes > 0, numBytes <= 4, offset + numBytes <= data.count else {
+            throw SSHSessionError.invalidKeyFormat
+        }
+
+        var length = 0
+        for i in 0..<numBytes {
+            length = (length << 8) | Int(data[offset + i])
+        }
+        offset += numBytes
+        return length
+    }
+
+    /// ASN.1 INTEGER를 읽어서 바이트 Data로 반환합니다 (선행 0x00 패딩 제거).
+    private static func readASN1Integer(from data: Data, offset: inout Int) throws -> Data {
+        try expectASN1Tag(0x02, in: data, offset: &offset)
+        let length = try readASN1Length(from: data, offset: &offset)
+        guard offset + length <= data.count else { throw SSHSessionError.invalidKeyFormat }
+
+        var intData = data[offset..<(offset + length)]
+        offset += length
+
+        // ASN.1 INTEGER는 부호 있는 표현이라 양수일 때 선행 0x00이 있을 수 있음
+        if let first = intData.first, first == 0x00, intData.count > 1 {
+            intData = intData.dropFirst()
+        }
+
+        return Data(intData)
     }
 }

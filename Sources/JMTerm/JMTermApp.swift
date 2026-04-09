@@ -7,6 +7,10 @@ import OSLog
 struct JMTermApp: App {
     @State private var connectionStore = ConnectionStore()
 
+    init() {
+        registerRSASHA512()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(connectionStore: connectionStore)
