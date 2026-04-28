@@ -154,11 +154,9 @@ final class SSHSession: Identifiable {
         guard let client else { return }
         guard let terminalView else { return }
 
-        // SFTP 준비 대기 후 MOTD 읽어서 셸 시작 전에 표시
-        for _ in 0..<20 {
-            if sftpService.isSFTPReady { break }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
+        // SFTP가 이미 준비됐다면 MOTD 표시. 셸 시작을 막지 않기 위해 대기는 하지 않음.
+        // 트레이드오프: SFTP가 늦게 열리는 경우 MOTD가 누락될 수 있으나,
+        // 대부분의 서버는 로그인 셸의 pam_motd가 자체적으로 출력함.
         if sftpService.isSFTPReady {
             await sftpService.readMOTD(terminalView: terminalView)
         }
@@ -190,11 +188,14 @@ final class SSHSession: Identifiable {
                         sessionBox.value.stdinWriter = writerBox.value
                     }
 
-                    // PS1에 OSC 7 추가 + echo 복원 (ECHO:0이라 명령 안 보임)
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(500))
-                        let setupCmd = #" PS1='\[\e]7;file://\H$(pwd)\a\]'"$PS1"; stty echo; printf '\033[1A\033[2K'"# + "\n"
-                        try? await writerBox.value.write(ByteBuffer(data: Data(setupCmd.utf8)))
+                    // PS1에 OSC 7 추가 + echo 복원 (ECHO:0이라 명령 안 보임).
+                    // 즉시 쓰기 안전성: SSH는 같은 채널 내 메시지 순서를 보장하고,
+                    // 서버는 이 바이트를 PTY stdin 버퍼에 큐잉했다가 셸의 첫 read()에서 전달함.
+                    let setupCmd = #" PS1='\[\e]7;file://\H$(pwd)\a\]'"$PS1"; stty echo; printf '\033[1A\033[2K'"# + "\n"
+                    do {
+                        try await writerBox.value.write(ByteBuffer(data: Data(setupCmd.utf8)))
+                    } catch {
+                        Logger.app.error("PTY 셋업 명령 쓰기 실패: \(error)")
                     }
 
                     for try await event in inbound {
