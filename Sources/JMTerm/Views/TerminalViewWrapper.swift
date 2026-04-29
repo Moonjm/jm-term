@@ -164,18 +164,22 @@ struct TerminalViewWrapper: NSViewRepresentable {
                 let keyCode = event.keyCode
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
-                // Home or Cmd+Left → ESC [ H (xterm Home)
+                // Home or Cmd+Left → Home (application/normal cursor 모드 분기)
                 if keyCode == 115 || (keyCode == 123 && flags.contains(.command)) {
                     MainActor.assumeIsolated {
-                        self.session?.sendToShell(Data([0x1b, 0x5b, 0x48]))
+                        let appCursor = tv.getTerminal().applicationCursor
+                        let bytes = appCursor ? EscapeSequences.moveHomeApp : EscapeSequences.moveHomeNormal
+                        self.session?.sendToShell(Data(bytes))
                     }
                     return nil
                 }
 
-                // End or Cmd+Right → ESC [ F (xterm End)
+                // End or Cmd+Right → End (application/normal cursor 모드 분기)
                 if keyCode == 119 || (keyCode == 124 && flags.contains(.command)) {
                     MainActor.assumeIsolated {
-                        self.session?.sendToShell(Data([0x1b, 0x5b, 0x46]))
+                        let appCursor = tv.getTerminal().applicationCursor
+                        let bytes = appCursor ? EscapeSequences.moveEndApp : EscapeSequences.moveEndNormal
+                        self.session?.sendToShell(Data(bytes))
                     }
                     return nil
                 }
