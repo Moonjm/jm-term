@@ -80,6 +80,7 @@ final class SSHSession: Identifiable {
     // when passing them to nonisolated Citadel async methods.
     private var client: SSHClient?
     private var stdinWriter: TTYStdinWriter?
+    private var cwdPollingTask: Task<Void, Never>?
     weak var terminalView: TerminalView?
 
     init(connection: ServerConnection) {
@@ -154,9 +155,14 @@ final class SSHSession: Identifiable {
         guard let client else { return }
         guard let terminalView else { return }
 
-        // SFTP가 이미 준비됐다면 MOTD 표시. 셸 시작을 막지 않기 위해 대기는 하지 않음.
-        // 트레이드오프: SFTP가 늦게 열리는 경우 MOTD가 누락될 수 있으나,
-        // 대부분의 서버는 로그인 셸의 pam_motd가 자체적으로 출력함.
+        // /etc/motd 와 /run/motd.dynamic 을 SFTP로 직접 읽어 표시.
+        // 일부 sshd/PAM 조합이 우리 세션에 대해 MOTD를 emit하지 않는 경우가 있어,
+        // ssh CLI에서 보이는 내용을 동일하게 보장하려고 SFTP로 우회한다.
+        // SFTP가 ready될 때까지 최대 2초까지만 대기.
+        for _ in 0..<20 {
+            if sftpService.isSFTPReady { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         if sftpService.isSFTPReady {
             await sftpService.readMOTD(terminalView: terminalView)
         }
@@ -165,6 +171,8 @@ final class SSHSession: Identifiable {
         let cols = terminal.cols
         let rows = terminal.rows
 
+        // PTY 모드는 기본값으로 — ECHO 등 termios는 서버 셸이 관리하도록 위임.
+        // 클라이언트는 stdin 주입을 하지 않는다.
         let ptyRequest = SSHChannelRequestEvent.PseudoTerminalRequest(
             wantReply: true,
             term: "xterm-256color",
@@ -172,12 +180,16 @@ final class SSHSession: Identifiable {
             terminalRowHeight: rows,
             terminalPixelWidth: 0,
             terminalPixelHeight: 0,
-            terminalModes: SSHTerminalModes([.ECHO: 0])
+            terminalModes: SSHTerminalModes([:])
         )
 
         let clientBox = UncheckedSendableBox(value: client)
         let termViewBox = UncheckedSendableBox(value: terminalView)
         let sessionBox = UncheckedSendableBox<SSHSession>(value: self)
+
+        // CWD 폴링 시작 — PTY 셸이 시작되면 /proc/$PID/cwd 를 주기적으로 읽어
+        // 사이드바를 셸의 현재 디렉토리에 자동 동기화.
+        startCWDPolling()
 
         // 별도 스레드에서 PTY 세션 실행 (메인스레드 블로킹 방지)
         Task.detached {
@@ -186,16 +198,6 @@ final class SSHSession: Identifiable {
                     let writerBox = UncheckedSendableBox(value: outbound)
                     await MainActor.run {
                         sessionBox.value.stdinWriter = writerBox.value
-                    }
-
-                    // PS1에 OSC 7 추가 + echo 복원 (ECHO:0이라 명령 안 보임).
-                    // 즉시 쓰기 안전성: SSH는 같은 채널 내 메시지 순서를 보장하고,
-                    // 서버는 이 바이트를 PTY stdin 버퍼에 큐잉했다가 셸의 첫 read()에서 전달함.
-                    let setupCmd = #" PS1='\[\e]7;file://\H$(pwd)\a\]'"$PS1"; stty echo; printf '\033[1A\033[2K'"# + "\n"
-                    do {
-                        try await writerBox.value.write(ByteBuffer(data: Data(setupCmd.utf8)))
-                    } catch {
-                        Logger.app.error("PTY 셋업 명령 쓰기 실패: \(error)")
                     }
 
                     for try await event in inbound {
@@ -249,6 +251,90 @@ final class SSHSession: Identifiable {
                 pixelWidth: 0, pixelHeight: 0
             )
         }
+    }
+
+    // MARK: - CWD Polling
+    //
+    // Tracks the interactive shell's current working directory by reading
+    // /proc/<PID>/cwd over a separate exec channel. Linux 전용 (Raspberry Pi OS,
+    // Ubuntu, Debian 등에서 동작). 가장 최근 시작된 사용자 셸 프로세스를
+    // 휴리스틱으로 선택하므로 같은 사용자가 다중 SSH 세션을 동시에 열면 부정확할 수
+    // 있다. stdin 주입 없이 동작하므로 프롬프트 시각 부작용은 없음.
+
+    func startCWDPolling() {
+        guard let client else { return }
+        let username = connection.username
+        let clientBox = UncheckedSendableBox(value: client)
+
+        cwdPollingTask?.cancel()
+        cwdPollingTask = Task.detached { [weak self] in
+            // 우리 SSH 세션의 인터랙티브 셸 PID 식별:
+            //   1) $SSH_CONNECTION 이 우리 세션과 동일한 사용자 프로세스를 찾음
+            //   2) 그 중 pts/* TTY가 붙은 것(=셸 본체) 중 PID가 가장 작은 것(=가장 오래된 = 셸 자체) 선택
+            // 자식 프로세스(vim 등)는 PID가 더 커서 자연히 제외됨. 다중 SSH 세션도 SSH_CONNECTION으로 정확히 구분됨.
+            let pidCmd = """
+            conn="$SSH_CONNECTION"
+            {
+              for p in $(ps -u \(username) -o pid= --no-headers 2>/dev/null | sort -n); do
+                if grep -aqF "SSH_CONNECTION=$conn" "/proc/$p/environ" 2>/dev/null; then
+                  t=$(ps -p "$p" -o tty= 2>/dev/null | tr -d ' \\n')
+                  case "$t" in pts/*) printf '%s\\n' "$p"; break ;; esac
+                fi
+              done
+            } | head -1
+            """
+            var pid: String?
+            for _ in 0..<10 {
+                if Task.isCancelled { return }
+                if let buf = try? await clientBox.value.executeCommand(pidCmd, inShell: true) {
+                    let raw = String(buffer: buf)
+                    // 응답에 MOTD/lastlog가 섞일 수 있으므로 마지막 숫자만 추출
+                    let lastNumeric = raw
+                        .split(whereSeparator: { $0.isNewline })
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .last(where: { Int($0) != nil })
+                    if let lastNumeric, !lastNumeric.isEmpty {
+                        pid = lastNumeric
+                        break
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            guard let pid else {
+                Logger.app.error("[CWD] PID 식별 실패 — 폴링 중단")
+                return
+            }
+
+            // /proc/<PID>/cwd 주기적 폴링 (500ms 간격).
+            // exit 코드 1을 받으면 (CommandFailed) shell wrapping으로 || true 처리해
+            // 빈 결과를 정상 반환받게 한다.
+            var lastCwd: String?
+            while !Task.isCancelled {
+                if let buf = try? await clientBox.value.executeCommand(
+                    "readlink /proc/\(pid)/cwd || true",
+                    inShell: true
+                ) {
+                    let cwd = String(buffer: buf)
+                        .split(whereSeparator: { $0.isNewline })
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .last(where: { $0.hasPrefix("/") }) ?? ""
+                    if cwd != lastCwd {
+                        lastCwd = cwd
+                        if !cwd.isEmpty {
+                            await MainActor.run { [weak self] in
+                                self?.currentPath = cwd
+                            }
+                        }
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    func stopCWDPolling() {
+        cwdPollingTask?.cancel()
+        cwdPollingTask = nil
     }
 
     // MARK: - Test Connection
@@ -313,6 +399,7 @@ final class SSHSession: Identifiable {
 
     func disconnect() async {
         statsMonitor.stop()
+        stopCWDPolling()
         await sftpService.close()
         if let client {
             let clientBox = UncheckedSendableBox(value: client)
