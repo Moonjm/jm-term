@@ -3,3 +3,5 @@
 .swiftpm/
 CLAUDE.md
 JMTerm.app/
+dist/
+scripts/sign.env
