@@ -1,0 +1,20 @@
+# https://docs.coderabbit.ai/reference/yaml-template
+language: ko-KR
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/*.pbxproj"
+    - "!**/*.xcworkspacedata"
+    - "!**/*.xcscheme"
+    - "!**/Package.resolved"
+  path_instructions:
+    - path: "**/*.swift"
+      instructions: "Swift 관례 준수 여부 확인. 동시성(actor 격리/메인스레드), 옵셔널 강제 언랩, 프로세스/파이프 입출력 및 리소스 해제, 에러 처리 위주로 점검."
+chat:
+  auto_reply: true
