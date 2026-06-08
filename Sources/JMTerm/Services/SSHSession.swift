@@ -477,37 +477,46 @@ final class SSHSession: Identifiable {
                     try? await client.close()
                 } else {
                     var openClients: [SSHClient] = []
-                    let first = conn.jumpHosts[0]
-                    let firstAuth = try resolveAuthMethod(
-                        authMethod: first.authMethod, username: first.username,
-                        password: creds.passwords[first.id]
-                    )
-                    let firstClient = try await SSHClient.connect(
-                        host: first.host, port: first.port,
-                        authenticationMethod: firstAuth,
-                        hostKeyValidator: nonPromptingValidator(host: first.host, port: first.port),
-                        reconnect: .never, algorithms: .all
-                    )
-                    openClients.append(firstClient)
-                    var current = firstClient
-                    for hop in conn.jumpHosts.dropFirst() {
-                        let settings = try makeJumpSettings(
-                            host: hop.host, port: hop.port, authMethod: hop.authMethod,
-                            username: hop.username, password: creds.passwords[hop.id],
-                            validator: nonPromptingValidator(host: hop.host, port: hop.port)
+                    do {
+                        let first = conn.jumpHosts[0]
+                        let firstAuth = try resolveAuthMethod(
+                            authMethod: first.authMethod, username: first.username,
+                            password: creds.passwords[first.id]
                         )
-                        let next = try await current.jump(to: settings)
-                        openClients.append(next)
-                        current = next
+                        let firstClient = try await SSHClient.connect(
+                            host: first.host, port: first.port,
+                            authenticationMethod: firstAuth,
+                            hostKeyValidator: nonPromptingValidator(host: first.host, port: first.port),
+                            reconnect: .never, algorithms: .all
+                        )
+                        openClients.append(firstClient)
+                        var current = firstClient
+                        for hop in conn.jumpHosts.dropFirst() {
+                            let settings = try makeJumpSettings(
+                                host: hop.host, port: hop.port, authMethod: hop.authMethod,
+                                username: hop.username, password: creds.passwords[hop.id],
+                                validator: nonPromptingValidator(host: hop.host, port: hop.port)
+                            )
+                            let next = try await current.jump(to: settings)
+                            openClients.append(next)
+                            current = next
+                        }
+                        let targetSettings = try makeJumpSettings(
+                            host: conn.host, port: conn.port, authMethod: conn.authMethod,
+                            username: conn.username, password: creds.passwords[conn.id],
+                            validator: nonPromptingValidator(host: conn.host, port: conn.port)
+                        )
+                        let targetClient = try await current.jump(to: targetSettings)
+                        try? await targetClient.close()
+                        for c in openClients.reversed() { try? await c.close() }
+                    } catch {
+                        // 체인 도중 실패 시 이미 열린 클라이언트를 정리한다.
+                        for c in openClients.reversed() {
+                            let box = UncheckedSendableBox(value: c)
+                            try? await box.value.close()
+                        }
+                        throw error
                     }
-                    let targetSettings = try makeJumpSettings(
-                        host: conn.host, port: conn.port, authMethod: conn.authMethod,
-                        username: conn.username, password: creds.passwords[conn.id],
-                        validator: nonPromptingValidator(host: conn.host, port: conn.port)
-                    )
-                    let targetClient = try await current.jump(to: targetSettings)
-                    try? await targetClient.close()
-                    for c in openClients.reversed() { try? await c.close() }
                 }
                 resolver.resolve(with: .success(()))
             } catch {
