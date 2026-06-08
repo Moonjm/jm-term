@@ -101,9 +101,10 @@ struct ConnectionFormView: View {
                         .foregroundStyle(.secondary)
                         .font(.caption)
                 case .success:
-                    Label("연결 성공", systemImage: "checkmark.circle.fill")
+                    Label("연결 성공 (호스트 키 미검증)", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                         .font(.caption)
+                        .help("도달 가능하고 인증에 성공했습니다. 호스트 키 신뢰 확인은 실제 연결 시 이뤄집니다.")
                 case .failure(let message):
                     Label(message, systemImage: "xmark.circle.fill")
                         .foregroundStyle(.red)

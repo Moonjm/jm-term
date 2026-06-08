@@ -256,6 +256,13 @@ final class SSHSession: Identifiable {
     }
 
     // 프롬프트 없이 known_hosts 만으로 검증 (testConnection 용).
+    //
+    // 보안 주의: testConnection은 UI를 띄우지 않는 도달성/인증 확인 용도라,
+    // known_hosts에 없는(=처음 보는) 호스트 키는 acceptAnything으로 통과시킨다.
+    // 즉 "테스트 성공"은 도달 가능·인증 성공을 뜻할 뿐, 호스트 키가 검증/신뢰됐다는
+    // 의미가 아니다(특히 바스티온이 MITM에 노출될 수 있음). 실제 연결 경로는
+    // buildHostKeyValidator(host:port:)로 미지/불일치 키를 사용자에게 프롬프트해
+    // 정상 검증한다.
     private nonisolated static func nonPromptingValidator(host: String, port: Int) -> SSHHostKeyValidator {
         let status = KnownHostsManager.lookup(host: host, port: port)
         if case .trusted(let keys) = status {

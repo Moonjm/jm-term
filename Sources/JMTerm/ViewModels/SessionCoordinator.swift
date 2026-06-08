@@ -86,10 +86,10 @@ final class SessionCoordinator {
     }
 
     func submitPassword(_ password: String) {
-        guard let current = passwordRequest, let conn = pendingConnectionForCredentials else { return }
+        guard let current = passwordRequest else { return }
+        // keychain 저장은 연결 성공 후로 미룬다(오타 비밀번호가 저장돼 다음 연결에서
+        // 프롬프트 없이 자동 로드되는 것을 방지). startSession(persistCredentials:) 참고.
         collectedPasswords[current.id] = password
-        let account = accountFor(id: current.id, in: conn)
-        try? connectionStore.savePassword(password, account: account)
 
         passwordQueue.removeFirst()
         passwordRequest = nil
@@ -114,7 +114,8 @@ final class SessionCoordinator {
         guard let conn = pendingConnectionForCredentials else { return }
         let creds = ResolvedCredentials(passwords: collectedPasswords)
         pendingConnectionForCredentials = nil
-        startSession(conn, credentials: creds)
+        // 저장된 연결로의 접속이므로, 연결이 성공하면 입력받은 비밀번호를 keychain에 저장한다.
+        startSession(conn, credentials: creds, persistCredentials: true)
     }
 
     private func accountFor(id: UUID, in conn: ServerConnection) -> String {
@@ -128,7 +129,10 @@ final class SessionCoordinator {
         connectionStore.remove(at: IndexSet(integer: index))
     }
 
-    func startSession(_ connection: ServerConnection, credentials: ResolvedCredentials) {
+    /// - persistCredentials: 연결이 성공한 뒤에만 입력받은 비밀번호를 keychain에 저장할지 여부.
+    ///   프롬프트 흐름(저장된 연결 접속)에서는 true. 새 연결 다이얼로그는 자체적으로
+    ///   "연결 정보 저장" 토글에 따라 저장하므로 false(기본값).
+    func startSession(_ connection: ServerConnection, credentials: ResolvedCredentials, persistCredentials: Bool = false) {
         let session = SSHSession(connection: connection)
         session.hostKeyPromptHandler = { [weak self] promptType in
             guard let self else { return .reject }
@@ -145,6 +149,11 @@ final class SessionCoordinator {
         Task {
             do {
                 try await session.connect(credentials: credentials)
+                if persistCredentials {
+                    for (id, password) in credentials.passwords {
+                        try? connectionStore.savePassword(password, account: accountFor(id: id, in: connection))
+                    }
+                }
                 session.startMonitoring()
                 do {
                     try await session.openSFTP()
