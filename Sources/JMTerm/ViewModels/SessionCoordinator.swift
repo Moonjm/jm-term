@@ -55,6 +55,8 @@ final class SessionCoordinator {
     /// 필요한 비밀번호(각 password-auth hop + 타깃)를 keychain에서 모으고,
     /// 빠진 것이 있으면 순차 프롬프트한다. 전부 모이면 연결을 시작한다.
     private func beginConnect(_ conn: ServerConnection) {
+        // 이미 자격증명 수집/프롬프트가 진행 중이면 재진입을 무시한다.
+        guard pendingConnectionForCredentials == nil else { return }
         collectedPasswords = [:]
         passwordQueue = []
         pendingConnectionForCredentials = conn
