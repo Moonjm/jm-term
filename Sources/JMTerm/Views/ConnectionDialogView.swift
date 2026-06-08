@@ -1,11 +1,11 @@
 // Sources/JMTerm/Views/ConnectionDialogView.swift
 import SwiftUI
-import OSLog
 
 struct ConnectionDialogView: View {
     @Environment(\.dismiss) private var dismiss
     let connectionStore: ConnectionStore
-    var onConnect: (ServerConnection, ResolvedCredentials) -> Void
+    /// - Bool: 연결이 성공하면 비밀번호를 keychain에 저장할지(=연결 정보 저장 여부).
+    var onConnect: (ServerConnection, ResolvedCredentials, Bool) -> Void
 
     @State private var name = ""
     @State private var host = ""
@@ -61,20 +61,14 @@ struct ConnectionDialogView: View {
             passwords[draft.id] = draft.password
         }
 
+        // 연결 레코드는 즉시 저장하되, 비밀번호는 연결 성공 후에 저장한다(오타가
+        // keychain에 남아 다음 연결에서 조용히 자동 로드되는 것을 방지).
+        // 저장 의도(saveConnection)를 coordinator로 넘겨 startSession 성공 시 저장한다.
         if saveConnection {
             connectionStore.add(connection)
-            if !useKey && !password.isEmpty {
-                do { try connectionStore.savePassword(password, for: connection) }
-                catch { Logger.app.error("[ConnectionDialog] 패스워드 저장 에러: \(error)") }
-            }
-            for draft in jumpDrafts where !draft.useKey && !draft.password.isEmpty {
-                let hop = draft.toJumpHost()
-                do { try connectionStore.savePassword(draft.password, account: hop.keychainAccount) }
-                catch { Logger.app.error("[ConnectionDialog] 점프 패스워드 저장 에러: \(error)") }
-            }
         }
 
-        onConnect(connection, ResolvedCredentials(passwords: passwords))
+        onConnect(connection, ResolvedCredentials(passwords: passwords), saveConnection)
         dismiss()
     }
 }

@@ -140,8 +140,8 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $coordinator.showConnectionDialog) {
-            ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, credentials in
-                coordinator.startSession(connection, credentials: credentials)
+            ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, credentials, persist in
+                coordinator.startSession(connection, credentials: credentials, persistCredentials: persist)
             }
         }
         .sheet(item: $coordinator.editingConnection) { conn in

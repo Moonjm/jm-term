@@ -63,8 +63,9 @@ struct ServerConnection: Codable, Identifiable, Hashable, Sendable {
 
 - `jumpHosts`의 순서가 경유 순서다: `jumpHosts[0]` → `jumpHosts[1]` → … →
   최종 서버(`ServerConnection` 본체).
-- 기본값/Optional 디코딩이라 기존 `connections.json`(필드 없음)은 빈 배열로
-  디코딩되어 하위 호환된다. (synthesized `init(from:)`이 누락 키를 기본값으로 처리)
+- 커스텀 디코딩 구현으로 기존 `connections.json`(필드 없음)이 빈 배열로
+  디코딩되어 하위 호환된다. (Swift 합성 Codable은 누락 키에 대해 throw하므로,
+  커스텀 `init(from:)`에서 `decodeIfPresent(...) ?? []`로 처리한다.)
 - 저장된 `ServerConnection`은 **최종(내부) 서버**를 나타내고, `jumpHosts`는
   경유지 목록으로 첨부된다.
 
