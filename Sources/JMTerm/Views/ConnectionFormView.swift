@@ -17,7 +17,7 @@ struct ConnectionFormView: View {
     private enum TestState: Equatable {
         case idle
         case testing
-        case success
+        case success(seconds: Double)
         case failure(String)
     }
 
@@ -50,20 +50,7 @@ struct ConnectionFormView: View {
                 .pickerStyle(.segmented)
 
                 if useKey {
-                    HStack {
-                        TextField("키 경로", text: $keyPath)
-                        Button("선택...") {
-                            let panel = NSOpenPanel()
-                            panel.title = "SSH 키 파일 선택"
-                            panel.allowsMultipleSelection = false
-                            panel.canChooseDirectories = false
-                            panel.canChooseFiles = true
-                            panel.directoryURL = URL(fileURLWithPath: NSString(string: "~/.ssh").expandingTildeInPath)
-                            if panel.runModal() == .OK, let url = panel.url {
-                                keyPath = url.path
-                            }
-                        }
-                    }
+                    LabeledContent("키 파일") { SSHKeyPicker(keyPath: $keyPath) }
                 } else {
                     SecureField("비밀번호", text: $password,
                                 prompt: Text("비우면 연결 시 물어봅니다"))
@@ -74,22 +61,27 @@ struct ConnectionFormView: View {
             }
 
             GroupBox("점프 호스트 경유 (선택)") {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     if jumpDrafts.isEmpty {
                         Text("경유 없이 직접 연결합니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    } else {
+                        Text("내부망 서버 앞의 게이트웨이(배스천)를 거쳐 접속합니다. 좌측 파일 탐색기도 최종 서버를 가리킵니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     ForEach($jumpDrafts) { $draft in
-                        JumpHostRowView(draft: $draft) {
+                        let step = (jumpDrafts.firstIndex(where: { $0.id == draft.id }) ?? 0) + 1
+                        JumpHostRowView(stepLabel: "\(step)단계 · 게이트웨이", draft: $draft) {
                             jumpDrafts.removeAll { $0.id == draft.id }
                         }
-                        Divider()
                     }
                     Button {
                         jumpDrafts.append(JumpHostDraft())
                     } label: {
-                        Label("점프 호스트 추가", systemImage: "plus.circle")
+                        Label(jumpDrafts.isEmpty ? "점프 호스트 추가" : "게이트웨이 추가", systemImage: "plus.circle")
                     }
                     .buttonStyle(.borderless)
                 }
@@ -129,8 +121,8 @@ struct ConnectionFormView: View {
                     Text("연결 테스트 중...")
                         .foregroundStyle(.secondary)
                         .font(.caption)
-                case .success:
-                    Label("연결 성공 (호스트 키 미검증)", systemImage: "checkmark.circle.fill")
+                case .success(let seconds):
+                    Label("연결 성공 · \(String(format: "%.1f초", seconds)) (호스트 키 미검증)", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                         .font(.caption)
                         .help("도달 가능하고 인증에 성공했습니다. 호스트 키 신뢰 확인은 실제 연결 시 이뤄집니다.")
@@ -178,10 +170,11 @@ struct ConnectionFormView: View {
         }
         let creds = ResolvedCredentials(passwords: passwords)
 
+        let start = Date()
         Task {
             do {
                 try await SSHSession.testConnection(connection, credentials: creds)
-                testState = .success
+                testState = .success(seconds: Date().timeIntervalSince(start))
             } catch {
                 testState = .failure(error.localizedDescription)
             }
@@ -190,40 +183,47 @@ struct ConnectionFormView: View {
 }
 
 private struct JumpHostRowView: View {
+    let stepLabel: String
     @Binding var draft: JumpHostDraft
     var onRemove: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                TextField("호스트", text: $draft.host)
-                TextField("포트", text: $draft.port)
-                    .frame(width: 64)
+                Label(stepLabel, systemImage: "arrow.triangle.branch")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
                 Button(role: .destructive, action: onRemove) {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
             }
-            TextField("사용자", text: $draft.username)
-            Toggle("SSH 키 사용", isOn: $draft.useKey)
+
+            HStack {
+                TextField("호스트", text: $draft.host, prompt: Text("게이트웨이 호스트"))
+                TextField("포트", text: $draft.port, prompt: Text("22"))
+                    .frame(width: 64)
+            }
+            TextField("사용자", text: $draft.username, prompt: Text("예: ec2-user"))
+
+            Picker("인증", selection: $draft.useKey) {
+                Text("비밀번호").tag(false)
+                Text("SSH 키").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
             if draft.useKey {
-                HStack {
-                    TextField("키 경로", text: $draft.keyPath)
-                    Button("선택...") {
-                        let panel = NSOpenPanel()
-                        panel.title = "SSH 키 파일 선택"
-                        panel.allowsMultipleSelection = false
-                        panel.canChooseDirectories = false
-                        panel.canChooseFiles = true
-                        panel.directoryURL = URL(fileURLWithPath: NSString(string: "~/.ssh").expandingTildeInPath)
-                        if panel.runModal() == .OK, let url = panel.url {
-                            draft.keyPath = url.path
-                        }
-                    }
-                }
+                SSHKeyPicker(keyPath: $draft.keyPath)
             } else {
-                SecureField("비밀번호", text: $draft.password)
+                SecureField("비밀번호", text: $draft.password, prompt: Text("비우면 연결 시 물어봅니다"))
             }
         }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.05))
+        )
     }
 }
