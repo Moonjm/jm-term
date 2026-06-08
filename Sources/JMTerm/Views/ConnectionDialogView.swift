@@ -5,7 +5,7 @@ import OSLog
 struct ConnectionDialogView: View {
     @Environment(\.dismiss) private var dismiss
     let connectionStore: ConnectionStore
-    var onConnect: (ServerConnection, String?) -> Void
+    var onConnect: (ServerConnection, ResolvedCredentials) -> Void
 
     @State private var name = ""
     @State private var host = ""
@@ -15,6 +15,7 @@ struct ConnectionDialogView: View {
     @State private var useKey = false
     @State private var keyPath = "~/.ssh/id_ed25519"
     @State private var saveConnection = true
+    @State private var jumpDrafts: [JumpHostDraft] = []
 
     var body: some View {
         VStack(spacing: 16) {
@@ -49,21 +50,30 @@ struct ConnectionDialogView: View {
             host: host,
             port: Int(port) ?? 22,
             username: username,
-            authMethod: authMethod
+            authMethod: authMethod,
+            jumpHosts: jumpDrafts.map { $0.toJumpHost() }
         )
+
+        var passwords: [UUID: String] = [:]
+        if !useKey && !password.isEmpty { passwords[connection.id] = password }
+        for draft in jumpDrafts where !draft.useKey && !draft.password.isEmpty {
+            passwords[draft.id] = draft.password
+        }
 
         if saveConnection {
             connectionStore.add(connection)
             if !useKey && !password.isEmpty {
-                do {
-                    try connectionStore.savePassword(password, for: connection)
-                } catch {
-                    Logger.app.error("[ConnectionDialog] 패스워드 저장 에러: \(error)")
-                }
+                do { try connectionStore.savePassword(password, for: connection) }
+                catch { Logger.app.error("[ConnectionDialog] 패스워드 저장 에러: \(error)") }
+            }
+            for draft in jumpDrafts where !draft.useKey && !draft.password.isEmpty {
+                let hop = draft.toJumpHost()
+                do { try connectionStore.savePassword(draft.password, account: hop.keychainAccount) }
+                catch { Logger.app.error("[ConnectionDialog] 점프 패스워드 저장 에러: \(error)") }
             }
         }
 
-        onConnect(connection, useKey ? nil : password)
+        onConnect(connection, ResolvedCredentials(passwords: passwords))
         dismiss()
     }
 }
