@@ -188,49 +188,58 @@ final class SSHSession: Identifiable {
     private func connectViaJumpChain(credentials: ResolvedCredentials) async throws {
         var clients: [SSHClient] = []
 
-        // 1) 최초 바스티온만 실제 TCP 연결.
-        let first = connection.jumpHosts[0]
-        let firstAuth = try Self.resolveAuthMethod(
-            authMethod: first.authMethod, username: first.username, password: credentials.passwords[first.id]
-        )
-        statusMessage = "바스티온 연결 중: \(first.host)"
-        let firstClient = try await SSHClient.connect(
-            host: first.host,
-            port: first.port,
-            authenticationMethod: firstAuth,
-            hostKeyValidator: buildHostKeyValidator(host: first.host, port: first.port),
-            reconnect: .never,
-            algorithms: .all
-        )
-        clients.append(firstClient)
-
-        // 2) 나머지 hop 들을 순서대로 jump.
-        var current = firstClient
-        for hop in connection.jumpHosts.dropFirst() {
-            let settings = try Self.makeJumpSettings(
-                host: hop.host, port: hop.port, authMethod: hop.authMethod,
-                username: hop.username, password: credentials.passwords[hop.id],
-                validator: buildHostKeyValidator(host: hop.host, port: hop.port)
+        do {
+            // 1) 최초 바스티온만 실제 TCP 연결.
+            let first = connection.jumpHosts[0]
+            let firstAuth = try Self.resolveAuthMethod(
+                authMethod: first.authMethod, username: first.username, password: credentials.passwords[first.id]
             )
-            statusMessage = "경유 연결 중: \(hop.host)"
-            let next = try await current.jump(to: settings)
-            clients.append(next)
-            current = next
+            statusMessage = "바스티온 연결 중: \(first.host)"
+            let firstClient = try await SSHClient.connect(
+                host: first.host,
+                port: first.port,
+                authenticationMethod: firstAuth,
+                hostKeyValidator: buildHostKeyValidator(host: first.host, port: first.port),
+                reconnect: .never,
+                algorithms: .all
+            )
+            clients.append(firstClient)
+
+            // 2) 나머지 hop 들을 순서대로 jump.
+            var current = firstClient
+            for hop in connection.jumpHosts.dropFirst() {
+                let settings = try Self.makeJumpSettings(
+                    host: hop.host, port: hop.port, authMethod: hop.authMethod,
+                    username: hop.username, password: credentials.passwords[hop.id],
+                    validator: buildHostKeyValidator(host: hop.host, port: hop.port)
+                )
+                statusMessage = "경유 연결 중: \(hop.host)"
+                let next = try await current.jump(to: settings)
+                clients.append(next)
+                current = next
+            }
+
+            // 3) 최종 내부 서버로 jump.
+            let targetSettings = try Self.makeJumpSettings(
+                host: connection.host, port: connection.port, authMethod: connection.authMethod,
+                username: connection.username, password: credentials.passwords[connection.id],
+                validator: buildHostKeyValidator(host: connection.host, port: connection.port)
+            )
+            statusMessage = "내부 서버 연결 중: \(connection.host)"
+            let targetClient = try await current.jump(to: targetSettings)
+
+            self.client = targetClient
+            self.jumpClients = clients
+            isConnected = true
+            statusMessage = "연결됨: \(connection.username)@\(connection.host):\(connection.port)"
+        } catch {
+            // 체인 도중 실패 시 이미 열린 클라이언트를 깊은 쪽(마지막)부터 닫는다.
+            for c in clients.reversed() {
+                let box = UncheckedSendableBox(value: c)
+                try? await box.value.close()
+            }
+            throw error
         }
-
-        // 3) 최종 내부 서버로 jump.
-        let targetSettings = try Self.makeJumpSettings(
-            host: connection.host, port: connection.port, authMethod: connection.authMethod,
-            username: connection.username, password: credentials.passwords[connection.id],
-            validator: buildHostKeyValidator(host: connection.host, port: connection.port)
-        )
-        statusMessage = "내부 서버 연결 중: \(connection.host)"
-        let targetClient = try await current.jump(to: targetSettings)
-
-        self.client = targetClient
-        self.jumpClients = clients
-        isConnected = true
-        statusMessage = "연결됨: \(connection.username)@\(connection.host):\(connection.port)"
     }
 
     private func buildHostKeyValidator(host: String, port: Int) -> SSHHostKeyValidator {
