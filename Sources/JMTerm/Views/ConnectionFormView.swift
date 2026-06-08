@@ -72,11 +72,20 @@ struct ConnectionFormView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    ForEach($jumpDrafts) { $draft in
-                        let step = (jumpDrafts.firstIndex(where: { $0.id == draft.id }) ?? 0) + 1
-                        JumpHostRowView(stepLabel: "\(step)단계 · 게이트웨이", draft: $draft) {
-                            jumpDrafts.removeAll { $0.id == draft.id }
+                    if !jumpDrafts.isEmpty {
+                        ScrollView {
+                            VStack(spacing: 10) {
+                                ForEach($jumpDrafts) { $draft in
+                                    let step = (jumpDrafts.firstIndex(where: { $0.id == draft.id }) ?? 0) + 1
+                                    JumpHostRowView(stepLabel: "\(step)단계 · 게이트웨이", draft: $draft) {
+                                        jumpDrafts.removeAll { $0.id == draft.id }
+                                    }
+                                }
+                            }
+                            .padding(.trailing, 2)
                         }
+                        // 호스트가 많아지면 목록만 스크롤 — 다이얼로그가 무한히 길어지지 않도록.
+                        .frame(maxHeight: 240)
                     }
                     Button {
                         jumpDrafts.append(JumpHostDraft())
