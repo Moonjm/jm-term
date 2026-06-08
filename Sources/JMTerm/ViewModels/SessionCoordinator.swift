@@ -9,8 +9,10 @@ final class SessionCoordinator {
     var sessions: [SSHSession] = []
     var activeSessionID: UUID?
     var showConnectionDialog = false
-    var showPasswordPrompt = false
-    var pendingConnection: ServerConnection?
+    var passwordRequest: PasswordRequest?
+    private var passwordQueue: [PasswordRequest] = []
+    private var collectedPasswords: [UUID: String] = [:]
+    private var pendingConnectionForCredentials: ServerConnection?
     var editingConnection: ServerConnection?
     var selectedConnectionID: ServerConnection.ID?
     var sidebarTab: SidebarTab = .servers
@@ -47,14 +49,79 @@ final class SessionCoordinator {
     }
 
     func connectToSaved(_ conn: ServerConnection) {
-        if case .publicKey = conn.authMethod {
-            startSession(conn, password: nil)
-        } else if let saved = connectionStore.loadPassword(for: conn), !saved.isEmpty {
-            startSession(conn, password: saved)
-        } else {
-            pendingConnection = conn
-            showPasswordPrompt = true
+        beginConnect(conn)
+    }
+
+    /// 필요한 비밀번호(각 password-auth hop + 타깃)를 keychain에서 모으고,
+    /// 빠진 것이 있으면 순차 프롬프트한다. 전부 모이면 연결을 시작한다.
+    private func beginConnect(_ conn: ServerConnection) {
+        // 이미 자격증명 수집/프롬프트가 진행 중이면 재진입을 무시한다.
+        guard pendingConnectionForCredentials == nil else { return }
+        collectedPasswords = [:]
+        passwordQueue = []
+        pendingConnectionForCredentials = conn
+
+        var requests: [PasswordRequest] = []
+        for hop in conn.jumpHosts where hop.authMethod == .password {
+            if let saved = connectionStore.loadPassword(account: hop.keychainAccount), !saved.isEmpty {
+                collectedPasswords[hop.id] = saved
+            } else {
+                requests.append(PasswordRequest(id: hop.id, label: hop.keychainAccount))
+            }
         }
+        if conn.authMethod == .password {
+            if let saved = connectionStore.loadPassword(account: conn.keychainAccount), !saved.isEmpty {
+                collectedPasswords[conn.id] = saved
+            } else {
+                requests.append(PasswordRequest(id: conn.id, label: conn.keychainAccount))
+            }
+        }
+
+        if requests.isEmpty {
+            launchPending()
+        } else {
+            passwordQueue = requests
+            passwordRequest = passwordQueue.first
+        }
+    }
+
+    func submitPassword(_ password: String) {
+        guard let current = passwordRequest else { return }
+        // keychain 저장은 연결 성공 후로 미룬다(오타 비밀번호가 저장돼 다음 연결에서
+        // 프롬프트 없이 자동 로드되는 것을 방지). startSession(persistCredentials:) 참고.
+        collectedPasswords[current.id] = password
+
+        passwordQueue.removeFirst()
+        passwordRequest = nil
+        if passwordQueue.isEmpty {
+            launchPending()
+        } else {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                passwordRequest = passwordQueue.first
+            }
+        }
+    }
+
+    func cancelPassword() {
+        passwordQueue = []
+        collectedPasswords = [:]
+        passwordRequest = nil
+        pendingConnectionForCredentials = nil
+    }
+
+    private func launchPending() {
+        guard let conn = pendingConnectionForCredentials else { return }
+        let creds = ResolvedCredentials(passwords: collectedPasswords)
+        pendingConnectionForCredentials = nil
+        // 저장된 연결로의 접속이므로, 연결이 성공하면 입력받은 비밀번호를 keychain에 저장한다.
+        startSession(conn, credentials: creds, persistCredentials: true)
+    }
+
+    private func accountFor(id: UUID, in conn: ServerConnection) -> String {
+        if id == conn.id { return conn.keychainAccount }
+        if let hop = conn.jumpHosts.first(where: { $0.id == id }) { return hop.keychainAccount }
+        return conn.keychainAccount
     }
 
     func deleteSaved(_ conn: ServerConnection) {
@@ -62,7 +129,10 @@ final class SessionCoordinator {
         connectionStore.remove(at: IndexSet(integer: index))
     }
 
-    func startSession(_ connection: ServerConnection, password: String?) {
+    /// - persistCredentials: 연결이 성공한 뒤에만 입력받은 비밀번호를 keychain에 저장할지 여부.
+    ///   프롬프트 흐름(저장된 연결 접속)에서는 true. 새 연결 다이얼로그는 자체적으로
+    ///   "연결 정보 저장" 토글에 따라 저장하므로 false(기본값).
+    func startSession(_ connection: ServerConnection, credentials: ResolvedCredentials, persistCredentials: Bool = false) {
         let session = SSHSession(connection: connection)
         session.hostKeyPromptHandler = { [weak self] promptType in
             guard let self else { return .reject }
@@ -78,7 +148,12 @@ final class SessionCoordinator {
 
         Task {
             do {
-                try await session.connect(password: password)
+                try await session.connect(credentials: credentials)
+                if persistCredentials {
+                    for (id, password) in credentials.passwords {
+                        try? connectionStore.savePassword(password, account: accountFor(id: id, in: connection))
+                    }
+                }
                 session.startMonitoring()
                 do {
                     try await session.openSFTP()
@@ -142,4 +217,9 @@ final class SessionCoordinator {
             showNextHostKeyPrompt()
         }
     }
+}
+
+struct PasswordRequest: Identifiable, Equatable {
+    let id: UUID       // 타깃 connection.id 또는 JumpHost.id
+    let label: String  // username@host:port
 }

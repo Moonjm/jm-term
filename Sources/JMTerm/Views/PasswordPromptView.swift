@@ -2,7 +2,8 @@ import SwiftUI
 
 struct PasswordPromptView: View {
     @Environment(\.dismiss) private var dismiss
-    let connection: ServerConnection?
+    let title: String
+    let subtitle: String?
     var onConnect: (String) -> Void
     var onCancel: () -> Void
 
@@ -14,9 +15,12 @@ struct PasswordPromptView: View {
                 .font(.system(size: 32))
                 .foregroundStyle(.secondary)
 
-            if let conn = connection {
-                Text("\(conn.username)@\(conn.host)")
-                    .font(.headline)
+            Text(title)
+                .font(.headline)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
 
             SecureField("비밀번호", text: $password)

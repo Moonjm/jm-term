@@ -13,6 +13,7 @@ struct EditConnectionView: View {
     @State private var password: String
     @State private var useKey: Bool
     @State private var keyPath: String
+    @State private var jumpDrafts: [JumpHostDraft]
 
     init(connectionStore: ConnectionStore, connection: ServerConnection) {
         self.connectionStore = connectionStore
@@ -29,6 +30,9 @@ struct EditConnectionView: View {
             _useKey = State(initialValue: false)
             _keyPath = State(initialValue: "~/.ssh/id_ed25519")
         }
+        _jumpDrafts = State(initialValue: connection.jumpHosts.map { hop in
+            JumpHostDraft(from: hop, password: connectionStore.loadPassword(account: hop.keychainAccount) ?? "")
+        })
     }
 
     var body: some View {
@@ -39,7 +43,8 @@ struct EditConnectionView: View {
             ConnectionFormView(
                 name: $name, host: $host, port: $port,
                 username: $username, password: $password,
-                useKey: $useKey, keyPath: $keyPath
+                useKey: $useKey, keyPath: $keyPath,
+                jumpDrafts: $jumpDrafts
             )
 
             HStack {
@@ -63,6 +68,7 @@ struct EditConnectionView: View {
         updated.port = Int(port) ?? 22
         updated.username = username
         updated.authMethod = authMethod
+        updated.jumpHosts = jumpDrafts.map { $0.toJumpHost() }
 
         connectionStore.update(updated)
 
@@ -71,6 +77,14 @@ struct EditConnectionView: View {
                 try connectionStore.savePassword(password, for: updated)
             } catch {
                 Logger.app.error("[EditConnection] 패스워드 저장 에러: \(error)")
+            }
+        }
+        for draft in jumpDrafts where !draft.useKey && !draft.password.isEmpty {
+            let hop = draft.toJumpHost()
+            do {
+                try connectionStore.savePassword(draft.password, account: hop.keychainAccount)
+            } catch {
+                Logger.app.error("[EditConnection] 점프 패스워드 저장 에러: \(error)")
             }
         }
 

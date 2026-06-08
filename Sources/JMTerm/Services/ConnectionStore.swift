@@ -27,6 +27,9 @@ final class ConnectionStore {
             let conn = connections[index]
             let account = "\(conn.username)@\(conn.host):\(conn.port)"
             try? KeychainManager.delete(for: account)
+            for hop in conn.jumpHosts where hop.authMethod == .password {
+                try? KeychainManager.delete(for: hop.keychainAccount)
+            }
         }
         connections.remove(atOffsets: offsets)
         save()
@@ -43,6 +46,18 @@ final class ConnectionStore {
                 try? KeychainManager.delete(for: oldAccount)
             }
 
+            // 점프 호스트가 변경/삭제/키인증 전환된 경우, 더 이상 쓰이지 않는 hop keychain 항목 정리.
+            let newHopAccounts = Set(
+                connection.jumpHosts
+                    .filter { $0.authMethod == .password }
+                    .map { $0.keychainAccount }
+            )
+            for oldHop in old.jumpHosts where oldHop.authMethod == .password {
+                if !newHopAccounts.contains(oldHop.keychainAccount) {
+                    try? KeychainManager.delete(for: oldHop.keychainAccount)
+                }
+            }
+
             connections[index] = connection
             save()
         }
@@ -56,6 +71,14 @@ final class ConnectionStore {
     func loadPassword(for connection: ServerConnection) -> String? {
         let account = "\(connection.username)@\(connection.host):\(connection.port)"
         return try? KeychainManager.read(for: account)
+    }
+
+    func savePassword(_ password: String, account: String) throws {
+        try KeychainManager.save(password: password, for: account)
+    }
+
+    func loadPassword(account: String) -> String? {
+        try? KeychainManager.read(for: account)
     }
 
     private func save() {

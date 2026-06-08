@@ -79,6 +79,7 @@ final class SSHSession: Identifiable {
     // They are only accessed on @MainActor. We use UncheckedSendableBox
     // when passing them to nonisolated Citadel async methods.
     private var client: SSHClient?
+    private var jumpClients: [SSHClient] = []
     private var stdinWriter: TTYStdinWriter?
     private var cwdPollingTask: Task<Void, Never>?
     weak var terminalView: TerminalView?
@@ -88,27 +89,73 @@ final class SSHSession: Identifiable {
     }
 
     private nonisolated static func resolveAuthMethod(
-        _ connection: ServerConnection, password: String?
+        authMethod: AuthMethod, username: String, password: String?
     ) throws -> SSHAuthenticationMethod {
-        switch connection.authMethod {
+        switch authMethod {
         case .password:
             guard let password else { throw SSHSessionError.passwordRequired }
-            return .passwordBased(username: connection.username, password: password)
+            return .passwordBased(username: username, password: password)
         case .publicKey(let path):
             let expandedPath = NSString(string: path).expandingTildeInPath
             let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
-            return try SSHKeyHelper.authenticationMethod(
-                fromPrivateKey: keyString,
-                username: connection.username
-            )
+            return try SSHKeyHelper.authenticationMethod(fromPrivateKey: keyString, username: username)
         }
     }
 
-    func connect(password: String?) async throws {
-        statusMessage = "연결 중..."
+    private nonisolated static func resolveAuthMethod(
+        _ connection: ServerConnection, password: String?
+    ) throws -> SSHAuthenticationMethod {
+        try resolveAuthMethod(authMethod: connection.authMethod, username: connection.username, password: password)
+    }
 
+    // jump(to:) 는 @Sendable () -> SSHAuthenticationMethod 를 요구한다.
+    // SSHAuthenticationMethod 는 non-Sendable 이므로 Sendable 원시값만 캡처하고
+    // 클로저 내부에서 생성한다. publicKey 의 경우 형식 오류를 즉시 표면화하기 위해
+    // 미리 한 번 파싱해 본다(성공 시 클로저 내부 재파싱은 안전).
+    private nonisolated static func makeAuthClosure(
+        authMethod: AuthMethod, username: String, password: String?
+    ) throws -> @Sendable () -> SSHAuthenticationMethod {
+        switch authMethod {
+        case .password:
+            guard let password else { throw SSHSessionError.passwordRequired }
+            return { .passwordBased(username: username, password: password) }
+        case .publicKey(let path):
+            let expandedPath = NSString(string: path).expandingTildeInPath
+            let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
+            _ = try SSHKeyHelper.authenticationMethod(fromPrivateKey: keyString, username: username)
+            return {
+                (try? SSHKeyHelper.authenticationMethod(fromPrivateKey: keyString, username: username))
+                    ?? .passwordBased(username: username, password: "")
+            }
+        }
+    }
+
+    private nonisolated static func makeJumpSettings(
+        host: String, port: Int, authMethod: AuthMethod, username: String,
+        password: String?, validator: SSHHostKeyValidator
+    ) throws -> SSHClientSettings {
+        let authClosure = try makeAuthClosure(authMethod: authMethod, username: username, password: password)
+        var settings = SSHClientSettings(
+            host: host, port: port,
+            authenticationMethod: authClosure,
+            hostKeyValidator: validator
+        )
+        settings.algorithms = .all
+        return settings
+    }
+
+    func connect(credentials: ResolvedCredentials) async throws {
+        statusMessage = "연결 중..."
+        if connection.jumpHosts.isEmpty {
+            try await connectDirect(password: credentials.passwords[connection.id])
+        } else {
+            try await connectViaJumpChain(credentials: credentials)
+        }
+    }
+
+    private func connectDirect(password: String?) async throws {
         let authMethod = try Self.resolveAuthMethod(connection, password: password)
-        let hostKeyValidator = buildHostKeyValidator()
+        let hostKeyValidator = buildHostKeyValidator(host: connection.host, port: connection.port)
 
         var sshClient: SSHClient?
         var lastError: Error?
@@ -138,17 +185,90 @@ final class SSHSession: Identifiable {
         statusMessage = "연결됨: \(connection.username)@\(connection.host):\(connection.port)"
     }
 
-    private func buildHostKeyValidator() -> SSHHostKeyValidator {
-        let status = KnownHostsManager.lookup(host: connection.host, port: connection.port)
+    private func connectViaJumpChain(credentials: ResolvedCredentials) async throws {
+        var clients: [SSHClient] = []
+
+        do {
+            // 1) 최초 바스티온만 실제 TCP 연결.
+            let first = connection.jumpHosts[0]
+            let firstAuth = try Self.resolveAuthMethod(
+                authMethod: first.authMethod, username: first.username, password: credentials.passwords[first.id]
+            )
+            statusMessage = "바스티온 연결 중: \(first.host)"
+            let firstClient = try await SSHClient.connect(
+                host: first.host,
+                port: first.port,
+                authenticationMethod: firstAuth,
+                hostKeyValidator: buildHostKeyValidator(host: first.host, port: first.port),
+                reconnect: .never,
+                algorithms: .all
+            )
+            clients.append(firstClient)
+
+            // 2) 나머지 hop 들을 순서대로 jump.
+            var current = firstClient
+            for hop in connection.jumpHosts.dropFirst() {
+                let settings = try Self.makeJumpSettings(
+                    host: hop.host, port: hop.port, authMethod: hop.authMethod,
+                    username: hop.username, password: credentials.passwords[hop.id],
+                    validator: buildHostKeyValidator(host: hop.host, port: hop.port)
+                )
+                statusMessage = "경유 연결 중: \(hop.host)"
+                let next = try await current.jump(to: settings)
+                clients.append(next)
+                current = next
+            }
+
+            // 3) 최종 내부 서버로 jump.
+            let targetSettings = try Self.makeJumpSettings(
+                host: connection.host, port: connection.port, authMethod: connection.authMethod,
+                username: connection.username, password: credentials.passwords[connection.id],
+                validator: buildHostKeyValidator(host: connection.host, port: connection.port)
+            )
+            statusMessage = "내부 서버 연결 중: \(connection.host)"
+            let targetClient = try await current.jump(to: targetSettings)
+
+            self.client = targetClient
+            self.jumpClients = clients
+            isConnected = true
+            statusMessage = "연결됨: \(connection.username)@\(connection.host):\(connection.port)"
+        } catch {
+            // 체인 도중 실패 시 이미 열린 클라이언트를 깊은 쪽(마지막)부터 닫는다.
+            for c in clients.reversed() {
+                let box = UncheckedSendableBox(value: c)
+                try? await box.value.close()
+            }
+            throw error
+        }
+    }
+
+    private func buildHostKeyValidator(host: String, port: Int) -> SSHHostKeyValidator {
+        let status = KnownHostsManager.lookup(host: host, port: port)
         let knownKeys: Set<NIOSSHPublicKey>? = if case .trusted(let keys) = status { keys } else { nil }
 
         let validator = HostKeyValidationDelegate(
             knownKeys: knownKeys,
-            host: connection.host,
-            port: connection.port,
+            host: host,
+            port: port,
             promptHandler: hostKeyPromptHandler
         )
         return .custom(validator)
+    }
+
+    // 프롬프트 없이 known_hosts 만으로 검증 (testConnection 용).
+    //
+    // 보안 주의: testConnection은 UI를 띄우지 않는 도달성/인증 확인 용도라,
+    // known_hosts에 없는(=처음 보는) 호스트 키는 acceptAnything으로 통과시킨다.
+    // 즉 "테스트 성공"은 도달 가능·인증 성공을 뜻할 뿐, 호스트 키가 검증/신뢰됐다는
+    // 의미가 아니다(특히 바스티온이 MITM에 노출될 수 있음). 실제 연결 경로는
+    // buildHostKeyValidator(host:port:)로 미지/불일치 키를 사용자에게 프롬프트해
+    // 정상 검증한다.
+    private nonisolated static func nonPromptingValidator(host: String, port: Int) -> SSHHostKeyValidator {
+        let status = KnownHostsManager.lookup(host: host, port: port)
+        if case .trusted(let keys) = status {
+            return .trustedKeys(keys)
+        }
+        return .acceptAnything()
     }
 
     func startShell() async throws {
@@ -339,37 +459,72 @@ final class SSHSession: Identifiable {
 
     // MARK: - Test Connection
 
-    /// Tests SSH connectivity without starting a shell or keeping the connection.
-    nonisolated static func testConnection(_ connection: ServerConnection, password: String?, timeout: Duration = .seconds(10)) async throws {
-        let authMethod = try resolveAuthMethod(connection, password: password)
-
-        // known_hosts 기반 호스트 키 검증 (프롬프트 없이 trusted만 통과, 나머지 수락)
-        let status = KnownHostsManager.lookup(host: connection.host, port: connection.port)
-        let hostKeyValidator: SSHHostKeyValidator
-        if case .trusted(let keys) = status {
-            hostKeyValidator = .trustedKeys(keys)
-        } else {
-            hostKeyValidator = .acceptAnything()
-        }
-
-        let authBox = UncheckedSendableBox(value: authMethod)
-        let validatorBox = UncheckedSendableBox(value: hostKeyValidator)
-        let host = connection.host
-        let port = connection.port
+    /// 직접 또는 체인 연결을 시도하고 즉시 닫아 도달성을 검증한다. 프롬프트 없음.
+    nonisolated static func testConnection(
+        _ connection: ServerConnection,
+        credentials: ResolvedCredentials,
+        timeout: Duration = .seconds(10)
+    ) async throws {
+        let connectionBox = UncheckedSendableBox(value: connection)
+        let credsBox = UncheckedSendableBox(value: credentials)
         let resolver = OnceResolver()
 
-        // 타임아웃 적용: detached task로 Sendable 제약 회피
         let connectTask = Task.detached {
             do {
-                let client = try await SSHClient.connect(
-                    host: host,
-                    port: port,
-                    authenticationMethod: authBox.value,
-                    hostKeyValidator: validatorBox.value,
-                    reconnect: .never,
-                    algorithms: .all
-                )
-                try? await client.close()
+                let conn = connectionBox.value
+                let creds = credsBox.value
+                if conn.jumpHosts.isEmpty {
+                    let auth = try resolveAuthMethod(conn, password: creds.passwords[conn.id])
+                    let client = try await SSHClient.connect(
+                        host: conn.host, port: conn.port,
+                        authenticationMethod: auth,
+                        hostKeyValidator: nonPromptingValidator(host: conn.host, port: conn.port),
+                        reconnect: .never, algorithms: .all
+                    )
+                    try? await client.close()
+                } else {
+                    var openClients: [SSHClient] = []
+                    do {
+                        let first = conn.jumpHosts[0]
+                        let firstAuth = try resolveAuthMethod(
+                            authMethod: first.authMethod, username: first.username,
+                            password: creds.passwords[first.id]
+                        )
+                        let firstClient = try await SSHClient.connect(
+                            host: first.host, port: first.port,
+                            authenticationMethod: firstAuth,
+                            hostKeyValidator: nonPromptingValidator(host: first.host, port: first.port),
+                            reconnect: .never, algorithms: .all
+                        )
+                        openClients.append(firstClient)
+                        var current = firstClient
+                        for hop in conn.jumpHosts.dropFirst() {
+                            let settings = try makeJumpSettings(
+                                host: hop.host, port: hop.port, authMethod: hop.authMethod,
+                                username: hop.username, password: creds.passwords[hop.id],
+                                validator: nonPromptingValidator(host: hop.host, port: hop.port)
+                            )
+                            let next = try await current.jump(to: settings)
+                            openClients.append(next)
+                            current = next
+                        }
+                        let targetSettings = try makeJumpSettings(
+                            host: conn.host, port: conn.port, authMethod: conn.authMethod,
+                            username: conn.username, password: creds.passwords[conn.id],
+                            validator: nonPromptingValidator(host: conn.host, port: conn.port)
+                        )
+                        let targetClient = try await current.jump(to: targetSettings)
+                        try? await targetClient.close()
+                        for c in openClients.reversed() { try? await c.close() }
+                    } catch {
+                        // 체인 도중 실패 시 이미 열린 클라이언트를 정리한다.
+                        for c in openClients.reversed() {
+                            let box = UncheckedSendableBox(value: c)
+                            try? await box.value.close()
+                        }
+                        throw error
+                    }
+                }
                 resolver.resolve(with: .success(()))
             } catch {
                 resolver.resolve(with: .failure(error))
@@ -405,7 +560,13 @@ final class SSHSession: Identifiable {
             let clientBox = UncheckedSendableBox(value: client)
             try? await clientBox.value.close()
         }
+        // 바스티온/중간 클라이언트를 깊은 쪽(마지막)부터 역순으로 닫는다.
+        for c in jumpClients.reversed() {
+            let box = UncheckedSendableBox(value: c)
+            try? await box.value.close()
+        }
         client = nil
+        jumpClients = []
         stdinWriter = nil
         isConnected = false
         statusMessage = "연결 끊김"
@@ -488,6 +649,15 @@ private final class HostKeyValidationDelegate: NIOSSHClientServerAuthenticationD
 
 extension Notification.Name {
     static let sshSessionEnded = Notification.Name("sshSessionEnded")
+}
+
+// MARK: - Credentials
+
+/// 한 연결을 수립하는 데 필요한 비밀번호 묶음.
+/// 키: 타깃 connection.id 또는 JumpHost.id (둘 다 .password 인증일 때만 존재).
+struct ResolvedCredentials: Sendable {
+    var passwords: [UUID: String]
+    init(passwords: [UUID: String] = [:]) { self.passwords = passwords }
 }
 
 // MARK: - Errors

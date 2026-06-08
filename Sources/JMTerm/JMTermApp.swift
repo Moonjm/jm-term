@@ -18,10 +18,6 @@ struct JMTermApp: App {
                 .onAppear {
                     NSApp.setActivationPolicy(.regular)
                     NSApp.activate(ignoringOtherApps: true)
-                    if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
-                       let icon = NSImage(contentsOf: iconURL) {
-                        NSApp.applicationIconImage = icon
-                    }
                 }
         }
         .defaultSize(width: 1200, height: 800)
@@ -136,24 +132,16 @@ struct ContentView: View {
             .padding(.vertical, 4)
             .background(Color(white: 0.08))
         }
-        .sheet(isPresented: $coordinator.showPasswordPrompt) {
-            PasswordPromptView(connection: coordinator.pendingConnection) { password in
-                if let conn = coordinator.pendingConnection {
-                    do {
-                        try coordinator.connectionStore.savePassword(password, for: conn)
-                    } catch {
-                        Logger.app.error("[PasswordPrompt] 패스워드 저장 에러: \(error)")
-                    }
-                    coordinator.startSession(conn, password: password)
-                }
-                coordinator.pendingConnection = nil
+        .sheet(item: $coordinator.passwordRequest) { request in
+            PasswordPromptView(title: "비밀번호 입력", subtitle: request.label) { password in
+                coordinator.submitPassword(password)
             } onCancel: {
-                coordinator.pendingConnection = nil
+                coordinator.cancelPassword()
             }
         }
         .sheet(isPresented: $coordinator.showConnectionDialog) {
-            ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, password in
-                coordinator.startSession(connection, password: password)
+            ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, credentials, persist in
+                coordinator.startSession(connection, credentials: credentials, persistCredentials: persist)
             }
         }
         .sheet(item: $coordinator.editingConnection) { conn in

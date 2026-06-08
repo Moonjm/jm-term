@@ -18,10 +18,11 @@ let package = Package(
                 .product(name: "Citadel", package: "Citadel"),
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
-            resources: [
-                .copy("Resources/AppIcon.icns"),
-                .copy("Resources/AppIcon.png"),
-            ]
+            exclude: ["Resources"]
+        ),
+        .testTarget(
+            name: "JMTermTests",
+            dependencies: ["JMTerm"]
         ),
     ]
 )
