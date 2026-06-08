@@ -25,7 +25,8 @@ struct ConnectionDialogView: View {
             ConnectionFormView(
                 name: $name, host: $host, port: $port,
                 username: $username, password: $password,
-                useKey: $useKey, keyPath: $keyPath
+                useKey: $useKey, keyPath: $keyPath,
+                jumpDrafts: $jumpDrafts
             )
 
             Toggle("연결 정보 저장", isOn: $saveConnection)
