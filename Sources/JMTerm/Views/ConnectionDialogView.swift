@@ -32,11 +32,13 @@ struct ConnectionDialogView: View {
             Toggle("연결 정보 저장", isOn: $saveConnection)
 
             HStack {
+                Spacer()
                 Button("취소") { dismiss() }
                     .keyboardShortcut(.cancelAction)
 
                 Button("연결") { connect() }
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
                     .disabled(host.isEmpty || username.isEmpty)
             }
         }

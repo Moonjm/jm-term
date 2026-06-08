@@ -48,11 +48,13 @@ struct EditConnectionView: View {
             )
 
             HStack {
+                Spacer()
                 Button("취소") { dismiss() }
                     .keyboardShortcut(.cancelAction)
 
                 Button("저장") { save() }
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
                     .disabled(host.isEmpty || username.isEmpty)
             }
         }

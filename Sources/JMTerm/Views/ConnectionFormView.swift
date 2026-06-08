@@ -12,6 +12,7 @@ struct ConnectionFormView: View {
     @Binding var jumpDrafts: [JumpHostDraft]
 
     @State private var testState: TestState = .idle
+    @FocusState private var hostFocused: Bool
 
     private enum TestState: Equatable {
         case idle
@@ -24,15 +25,30 @@ struct ConnectionFormView: View {
         !host.isEmpty && !username.isEmpty && (useKey || !password.isEmpty)
     }
 
+    /// 이름을 비웠을 때 자동 생성되는 값 미리보기.
+    private var autoNamePrompt: String {
+        let u = username.isEmpty ? "user" : username
+        let h = host.isEmpty ? "host" : host
+        return "비우면 자동: \(u)@\(h)"
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             Form {
-                TextField("이름", text: $name)
-                TextField("호스트", text: $host)
-                TextField("포트", text: $port)
-                TextField("사용자", text: $username)
+                // 서버: 핵심 필수 항목을 맨 위로.
+                TextField("호스트 *", text: $host,
+                          prompt: Text("예: 192.168.0.10 또는 server.example.com"))
+                    .focused($hostFocused)
+                TextField("포트", text: $port, prompt: Text("22"))
+                TextField("사용자 *", text: $username, prompt: Text("예: ubuntu, root"))
 
-                Toggle("SSH 키 사용", isOn: $useKey)
+                // 인증: 토글 대신 명시적 모드 선택(세그먼트).
+                Picker("인증", selection: $useKey) {
+                    Text("비밀번호").tag(false)
+                    Text("SSH 키").tag(true)
+                }
+                .pickerStyle(.segmented)
+
                 if useKey {
                     HStack {
                         TextField("키 경로", text: $keyPath)
@@ -49,8 +65,12 @@ struct ConnectionFormView: View {
                         }
                     }
                 } else {
-                    SecureField("비밀번호", text: $password)
+                    SecureField("비밀번호", text: $password,
+                                prompt: Text("비우면 연결 시 물어봅니다"))
                 }
+
+                // 이름: host/user에서 파생되므로 맨 아래·선택.
+                TextField("이름", text: $name, prompt: Text(autoNamePrompt))
             }
 
             GroupBox("점프 호스트 경유 (선택)") {
@@ -85,17 +105,26 @@ struct ConnectionFormView: View {
                         if case .testing = testState {
                             ProgressView()
                                 .controlSize(.small)
+                        } else {
+                            Image(systemName: "bolt.horizontal")
                         }
                         Text("테스트 연결")
                     }
                 }
+                .buttonStyle(.bordered)
                 .disabled(!canTest || testState == .testing)
 
                 Spacer()
 
                 switch testState {
                 case .idle:
-                    EmptyView()
+                    if !canTest {
+                        Text("호스트·사용자를 입력하면 테스트할 수 있어요.")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    } else {
+                        EmptyView()
+                    }
                 case .testing:
                     Text("연결 테스트 중...")
                         .foregroundStyle(.secondary)
@@ -121,6 +150,13 @@ struct ConnectionFormView: View {
         .onChange(of: useKey) { testState = .idle }
         .onChange(of: keyPath) { testState = .idle }
         .onChange(of: jumpDrafts) { testState = .idle }
+        .onAppear {
+            // 시트 표시 직후 핵심 필드(호스트)에 포커스.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(60))
+                hostFocused = true
+            }
+        }
     }
 
     private func testConnection() {
