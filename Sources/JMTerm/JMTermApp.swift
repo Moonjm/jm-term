@@ -132,19 +132,11 @@ struct ContentView: View {
             .padding(.vertical, 4)
             .background(Color(white: 0.08))
         }
-        .sheet(isPresented: $coordinator.showPasswordPrompt) {
-            PasswordPromptView(connection: coordinator.pendingConnection) { password in
-                if let conn = coordinator.pendingConnection {
-                    do {
-                        try coordinator.connectionStore.savePassword(password, for: conn)
-                    } catch {
-                        Logger.app.error("[PasswordPrompt] 패스워드 저장 에러: \(error)")
-                    }
-                    coordinator.startSession(conn, password: password)
-                }
-                coordinator.pendingConnection = nil
+        .sheet(item: $coordinator.passwordRequest) { request in
+            PasswordPromptView(title: "비밀번호 입력", subtitle: request.label) { password in
+                coordinator.submitPassword(password)
             } onCancel: {
-                coordinator.pendingConnection = nil
+                coordinator.cancelPassword()
             }
         }
         .sheet(isPresented: $coordinator.showConnectionDialog) {
