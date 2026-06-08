@@ -58,6 +58,14 @@ final class ConnectionStore {
         return try? KeychainManager.read(for: account)
     }
 
+    func savePassword(_ password: String, account: String) throws {
+        try KeychainManager.save(password: password, for: account)
+    }
+
+    func loadPassword(account: String) -> String? {
+        try? KeychainManager.read(for: account)
+    }
+
     private func save() {
         do {
             let data = try JSONEncoder().encode(connections)
