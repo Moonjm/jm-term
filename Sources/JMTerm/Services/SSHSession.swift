@@ -88,20 +88,59 @@ final class SSHSession: Identifiable {
     }
 
     private nonisolated static func resolveAuthMethod(
-        _ connection: ServerConnection, password: String?
+        authMethod: AuthMethod, username: String, password: String?
     ) throws -> SSHAuthenticationMethod {
-        switch connection.authMethod {
+        switch authMethod {
         case .password:
             guard let password else { throw SSHSessionError.passwordRequired }
-            return .passwordBased(username: connection.username, password: password)
+            return .passwordBased(username: username, password: password)
         case .publicKey(let path):
             let expandedPath = NSString(string: path).expandingTildeInPath
             let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
-            return try SSHKeyHelper.authenticationMethod(
-                fromPrivateKey: keyString,
-                username: connection.username
-            )
+            return try SSHKeyHelper.authenticationMethod(fromPrivateKey: keyString, username: username)
         }
+    }
+
+    private nonisolated static func resolveAuthMethod(
+        _ connection: ServerConnection, password: String?
+    ) throws -> SSHAuthenticationMethod {
+        try resolveAuthMethod(authMethod: connection.authMethod, username: connection.username, password: password)
+    }
+
+    // jump(to:) 는 @Sendable () -> SSHAuthenticationMethod 를 요구한다.
+    // SSHAuthenticationMethod 는 non-Sendable 이므로 Sendable 원시값만 캡처하고
+    // 클로저 내부에서 생성한다. publicKey 의 경우 형식 오류를 즉시 표면화하기 위해
+    // 미리 한 번 파싱해 본다(성공 시 클로저 내부 재파싱은 안전).
+    private nonisolated static func makeAuthClosure(
+        authMethod: AuthMethod, username: String, password: String?
+    ) throws -> @Sendable () -> SSHAuthenticationMethod {
+        switch authMethod {
+        case .password:
+            guard let password else { throw SSHSessionError.passwordRequired }
+            return { .passwordBased(username: username, password: password) }
+        case .publicKey(let path):
+            let expandedPath = NSString(string: path).expandingTildeInPath
+            let keyString = try String(contentsOfFile: expandedPath, encoding: .utf8)
+            _ = try SSHKeyHelper.authenticationMethod(fromPrivateKey: keyString, username: username)
+            return {
+                (try? SSHKeyHelper.authenticationMethod(fromPrivateKey: keyString, username: username))
+                    ?? .passwordBased(username: username, password: "")
+            }
+        }
+    }
+
+    private nonisolated static func makeJumpSettings(
+        host: String, port: Int, authMethod: AuthMethod, username: String,
+        password: String?, validator: SSHHostKeyValidator
+    ) throws -> SSHClientSettings {
+        let authClosure = try makeAuthClosure(authMethod: authMethod, username: username, password: password)
+        var settings = SSHClientSettings(
+            host: host, port: port,
+            authenticationMethod: authClosure,
+            hostKeyValidator: validator
+        )
+        settings.algorithms = .all
+        return settings
     }
 
     func connect(password: String?) async throws {
@@ -138,17 +177,26 @@ final class SSHSession: Identifiable {
         statusMessage = "연결됨: \(connection.username)@\(connection.host):\(connection.port)"
     }
 
-    private func buildHostKeyValidator() -> SSHHostKeyValidator {
-        let status = KnownHostsManager.lookup(host: connection.host, port: connection.port)
+    private func buildHostKeyValidator(host: String, port: Int) -> SSHHostKeyValidator {
+        let status = KnownHostsManager.lookup(host: host, port: port)
         let knownKeys: Set<NIOSSHPublicKey>? = if case .trusted(let keys) = status { keys } else { nil }
 
         let validator = HostKeyValidationDelegate(
             knownKeys: knownKeys,
-            host: connection.host,
-            port: connection.port,
+            host: host,
+            port: port,
             promptHandler: hostKeyPromptHandler
         )
         return .custom(validator)
+    }
+
+    // 프롬프트 없이 known_hosts 만으로 검증 (testConnection 용).
+    private nonisolated static func nonPromptingValidator(host: String, port: Int) -> SSHHostKeyValidator {
+        let status = KnownHostsManager.lookup(host: host, port: port)
+        if case .trusted(let keys) = status {
+            return .trustedKeys(keys)
+        }
+        return .acceptAnything()
     }
 
     func startShell() async throws {
