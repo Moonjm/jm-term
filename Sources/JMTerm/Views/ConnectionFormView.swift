@@ -110,7 +110,7 @@ struct ConnectionFormView: View {
 
         Task {
             do {
-                try await SSHSession.testConnection(connection, password: pwd)
+                try await SSHSession.testConnection(connection, credentials: ResolvedCredentials(passwords: pwd.map { [connection.id: $0] } ?? [:]))
                 testState = .success
             } catch {
                 testState = .failure(error.localizedDescription)
