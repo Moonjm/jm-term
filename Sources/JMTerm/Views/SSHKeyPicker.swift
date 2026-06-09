@@ -18,7 +18,11 @@ enum SSHKeyScanner {
             if name.hasSuffix(".pub") || name.hasPrefix(".") || excluded.contains(name) { return nil }
             let hasPubPair = pubNames.contains(name + ".pub")
             guard hasPubPair || name.hasPrefix("id_") else { return nil }
-            return dir + "/" + name
+            // 일반 파일만 후보로(디렉터리 제외 — 예: ~/.ssh/id_backup/).
+            let fullPath = dir + "/" + name
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: fullPath, isDirectory: &isDir), !isDir.boolValue else { return nil }
+            return fullPath
         }
     }
 }
