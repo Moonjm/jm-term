@@ -22,7 +22,8 @@ struct ConnectionFormView: View {
     }
 
     private var canTest: Bool {
-        !host.isEmpty && !username.isEmpty && portValid && (useKey || !password.isEmpty)
+        !host.isEmpty && !username.isEmpty && portValid
+            && (useKey ? !keyPath.isEmpty : !password.isEmpty)
     }
 
     /// 포트가 비었거나(=기본 22) 1–65535 범위의 숫자면 유효.
@@ -65,9 +66,20 @@ struct ConnectionFormView: View {
 
     /// 연결 실패 원인을 단계(해석·TCP·인증·호스트키)별 친화 메시지로 분류.
     private func diagnose(_ error: Error) -> String {
-        if let e = error as? SSHSessionError, case .connectionTimeout = e {
-            return "연결 시간 초과 — 호스트·포트·방화벽을 확인하세요"
+        // SSHSessionError 는 errorDescription 이 한국어라 아래 영문 키워드 매칭이 안 된다.
+        // 따라서 우리 타입은 case 로 먼저 분류하고, 그 외(Citadel/NIO 영문 에러)만 키워드로 분류한다.
+        // 참고: 테스트 연결은 nonPromptingValidator(.acceptAnything)을 쓰므로 미지 호스트에서는
+        // hostKeyRejected 가 발생하지 않는다(주로 신뢰 키 불일치 시에만).
+        if let e = error as? SSHSessionError {
+            switch e {
+            case .connectionTimeout: return "연결 시간 초과 — 호스트·포트·방화벽을 확인하세요"
+            case .hostKeyRejected: return "호스트 키 거부됨 — 신뢰할 수 없는 호스트 키"
+            case .passwordRequired: return "비밀번호가 필요합니다"
+            case .invalidKeyFormat, .unsupportedKeyType: return "키 형식 오류 — SSH 키 파일을 확인하세요"
+            case .notConnected: return "연결할 수 없습니다"
+            }
         }
+
         let d = error.localizedDescription.lowercased()
         if d.contains("refused") {
             return "연결 거부됨 — 포트(\(port.isEmpty ? "22" : port))·방화벽을 확인하세요"
@@ -78,7 +90,7 @@ struct ConnectionFormView: View {
         if d.contains("permission denied") || d.contains("auth") || d.contains("password") {
             return "인증 실패 — 사용자·비밀번호·키를 확인하세요"
         }
-        if d.contains("host key") || d.contains("hostkey") || d.contains("rejected") {
+        if d.contains("host key") || d.contains("hostkey") {
             return "호스트 키 문제 — 신뢰할 수 없는 호스트 키"
         }
         if d.contains("timed out") || d.contains("timeout") {
