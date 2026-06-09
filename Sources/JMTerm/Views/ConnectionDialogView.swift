@@ -14,7 +14,6 @@ struct ConnectionDialogView: View {
     @State private var password = ""
     @State private var useKey = false
     @State private var keyPath = "~/.ssh/id_ed25519"
-    @State private var saveConnection = true
     @State private var jumpDrafts: [JumpHostDraft] = []
 
     var body: some View {
@@ -28,8 +27,6 @@ struct ConnectionDialogView: View {
                 useKey: $useKey, keyPath: $keyPath,
                 jumpDrafts: $jumpDrafts
             )
-
-            Toggle("연결 정보 저장", isOn: $saveConnection)
 
             HStack {
                 Spacer()
@@ -63,14 +60,12 @@ struct ConnectionDialogView: View {
             passwords[draft.id] = draft.password
         }
 
-        // 연결 레코드는 즉시 저장하되, 비밀번호는 연결 성공 후에 저장한다(오타가
-        // keychain에 남아 다음 연결에서 조용히 자동 로드되는 것을 방지).
-        // 저장 의도(saveConnection)를 coordinator로 넘겨 startSession 성공 시 저장한다.
-        if saveConnection {
-            connectionStore.add(connection)
-        }
+        // 연결 정보는 항상 저장한다. 단, 연결 레코드는 즉시 저장하고 비밀번호는
+        // 연결 성공 후에 저장한다(오타가 keychain에 남아 다음 연결에서 조용히
+        // 자동 로드되는 것을 방지). persist=true로 coordinator가 성공 시 저장한다.
+        connectionStore.add(connection)
 
-        onConnect(connection, ResolvedCredentials(passwords: passwords), saveConnection)
+        onConnect(connection, ResolvedCredentials(passwords: passwords), true)
         dismiss()
     }
 }
