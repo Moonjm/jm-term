@@ -18,11 +18,18 @@ struct ConnectionFormView: View {
         case idle
         case testing
         case success(seconds: Double)
-        case failure(String)
+        case failure(message: String, detail: String)
     }
 
     private var canTest: Bool {
-        !host.isEmpty && !username.isEmpty && (useKey || !password.isEmpty)
+        !host.isEmpty && !username.isEmpty && portValid && (useKey || !password.isEmpty)
+    }
+
+    /// 포트가 비었거나(=기본 22) 1–65535 범위의 숫자면 유효.
+    private var portValid: Bool {
+        if port.isEmpty { return true }
+        if let p = Int(port), (1...65535).contains(p) { return true }
+        return false
     }
 
     /// 이름을 비웠을 때 자동 생성되는 값 미리보기.
@@ -32,14 +39,67 @@ struct ConnectionFormView: View {
         return "비우면 자동: \(u)@\(h)"
     }
 
+    /// `user@host:port`(또는 `ssh://…`)를 호스트 칸에 붙여넣으면 자동 분해.
+    /// '@'가 있을 때만 동작해 일반 타이핑을 방해하지 않는다.
+    private func quickParseHost() {
+        var s = host
+        if s.hasPrefix("ssh://") { s.removeFirst("ssh://".count) }
+        guard let at = s.firstIndex(of: "@") else {
+            if s != host { host = s }   // ssh:// 접두어만 정리
+            return
+        }
+        let userPart = String(s[..<at])
+        var rest = String(s[s.index(after: at)...])
+        var parsedPort: String?
+        if !rest.contains("["), let colon = rest.lastIndex(of: ":") {
+            let after = String(rest[rest.index(after: colon)...])
+            if !after.isEmpty, after.allSatisfy(\.isNumber) {
+                parsedPort = after
+                rest = String(rest[..<colon])
+            }
+        }
+        if !userPart.isEmpty { username = userPart }
+        if let parsedPort { port = parsedPort }
+        host = rest
+    }
+
+    /// 연결 실패 원인을 단계(해석·TCP·인증·호스트키)별 친화 메시지로 분류.
+    private func diagnose(_ error: Error) -> String {
+        if let e = error as? SSHSessionError, case .connectionTimeout = e {
+            return "연결 시간 초과 — 호스트·포트·방화벽을 확인하세요"
+        }
+        let d = error.localizedDescription.lowercased()
+        if d.contains("refused") {
+            return "연결 거부됨 — 포트(\(port.isEmpty ? "22" : port))·방화벽을 확인하세요"
+        }
+        if d.contains("nodename") || d.contains("not known") || d.contains("resolve") || d.contains("hostname") {
+            return "호스트를 찾을 수 없습니다 — 주소(DNS)를 확인하세요"
+        }
+        if d.contains("permission denied") || d.contains("auth") || d.contains("password") {
+            return "인증 실패 — 사용자·비밀번호·키를 확인하세요"
+        }
+        if d.contains("host key") || d.contains("hostkey") || d.contains("rejected") {
+            return "호스트 키 문제 — 신뢰할 수 없는 호스트 키"
+        }
+        if d.contains("timed out") || d.contains("timeout") {
+            return "연결 시간 초과 — 네트워크·방화벽을 확인하세요"
+        }
+        return error.localizedDescription
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             Form {
                 // 서버: 핵심 필수 항목을 맨 위로.
                 TextField("호스트 *", text: $host,
-                          prompt: Text("예: 192.168.0.10 또는 server.example.com"))
+                          prompt: Text("예: 192.168.0.10 · user@host:port 붙여넣기 가능"))
                     .focused($hostFocused)
                 TextField("포트", text: $port, prompt: Text("22"))
+                if !portValid {
+                    Text("포트는 1–65535 사이 숫자여야 합니다")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 TextField("사용자 *", text: $username, prompt: Text("예: ubuntu, root"))
 
                 // 인증: 토글 대신 명시적 모드 선택(세그먼트).
@@ -135,17 +195,24 @@ struct ConnectionFormView: View {
                         .foregroundStyle(.green)
                         .font(.caption)
                         .help("도달 가능하고 인증에 성공했습니다. 호스트 키 신뢰 확인은 실제 연결 시 이뤄집니다.")
-                case .failure(let message):
+                case .failure(let message, let detail):
                     Label(message, systemImage: "xmark.circle.fill")
                         .foregroundStyle(.red)
                         .font(.caption)
                         .lineLimit(2)
-                        .help(message)
+                        .help(detail)
                 }
             }
         }
-        .onChange(of: host) { testState = .idle }
-        .onChange(of: port) { testState = .idle }
+        .onChange(of: host) {
+            testState = .idle
+            quickParseHost()
+        }
+        .onChange(of: port) {
+            testState = .idle
+            let digits = port.filter(\.isNumber)
+            if digits != port { port = digits }
+        }
         .onChange(of: username) { testState = .idle }
         .onChange(of: password) { testState = .idle }
         .onChange(of: useKey) { testState = .idle }
@@ -185,7 +252,7 @@ struct ConnectionFormView: View {
                 try await SSHSession.testConnection(connection, credentials: creds)
                 testState = .success(seconds: Date().timeIntervalSince(start))
             } catch {
-                testState = .failure(error.localizedDescription)
+                testState = .failure(message: diagnose(error), detail: error.localizedDescription)
             }
         }
     }
