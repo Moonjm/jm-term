@@ -98,6 +98,9 @@ final class SSHSession: Identifiable {
     private var cwdPollingTask: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
     private var isShellRunning = false
+    /// 연결 세대. 재연결 시 증가하며, 이전 세대의 PTY 종료 핸들러·keepalive·
+    /// disconnect 잔여 작업이 새 연결의 상태를 건드리지 못하게 막는다.
+    private var connectionGeneration = 0
     weak var terminalView: TerminalView?
 
     init(connection: ServerConnection) {
@@ -167,6 +170,7 @@ final class SSHSession: Identifiable {
     }
 
     func connect(credentials: ResolvedCredentials) async throws {
+        connectionGeneration += 1
         state = .connecting
         statusMessage = "연결 중..."
         do {
@@ -344,6 +348,7 @@ final class SSHSession: Identifiable {
         let clientBox = UncheckedSendableBox(value: client)
         let termViewBox = UncheckedSendableBox(value: terminalView)
         let sessionBox = UncheckedSendableBox<SSHSession>(value: self)
+        let generation = connectionGeneration
 
         // CWD 폴링 시작 — PTY 셸이 시작되면 /proc/$PID/cwd 를 주기적으로 읽어
         // 사이드바를 셸의 현재 디렉토리에 자동 동기화.
@@ -369,24 +374,26 @@ final class SSHSession: Identifiable {
                     }
 
                     await MainActor.run {
-                        sessionBox.value.markShellEnded(message: "연결 종료됨")
+                        sessionBox.value.markShellEnded(message: "연결 종료됨", generation: generation)
                     }
                 }
             } catch is CancellationError {
                 await MainActor.run {
-                    sessionBox.value.markShellEnded(message: "연결 종료됨")
+                    sessionBox.value.markShellEnded(message: "연결 종료됨", generation: generation)
                 }
             } catch {
                 Logger.app.error("셸 오류: \(error)")
                 await MainActor.run {
-                    sessionBox.value.markShellEnded(message: "셸 오류: \(error.localizedDescription)")
+                    sessionBox.value.markShellEnded(message: "셸 오류: \(error.localizedDescription)", generation: generation)
                 }
             }
         }
     }
 
     /// PTY 스트림이 끝났을 때 공통 정리: 상태 전이 + 종료 알림.
-    private func markShellEnded(message: String) {
+    /// 이전 세대 셸의 늦은 종료가 재연결된 세션을 끊김 처리하지 않도록 세대를 검사한다.
+    private func markShellEnded(message: String, generation: Int) {
+        guard generation == connectionGeneration else { return }
         isShellRunning = false
         isConnected = false
         // keepalive 등이 먼저 끊김 처리했다면 더 구체적인 사유 메시지를 유지한다.
@@ -504,9 +511,13 @@ final class SSHSession: Identifiable {
     // NAT/방화벽 뒤에서 유휴 세션이 조용히 끊기는 것을 감지한다. 30초마다 가벼운
     // 원격 명령으로 응답을 확인하고, 3회 연속 무응답이면 세션을 끊긴 것으로 처리한다.
 
+    // 한계: exec 채널로 "true"를 실행하므로 ForceCommand/제한 셸 등 exec이 막힌
+    // 서버에서는 프로브가 항상 실패해 정상 세션이 끊김 처리될 수 있다.
+    // (Citadel이 keepalive@openssh.com 글로벌 요청을 노출하지 않아 차선책)
     func startKeepalive() {
         guard let client else { return }
         let clientBox = UncheckedSendableBox(value: client)
+        let generation = connectionGeneration
 
         keepaliveTask?.cancel()
         keepaliveTask = Task { [weak self] in
@@ -519,7 +530,7 @@ final class SSHSession: Identifiable {
                 consecutiveFailures = alive ? 0 : consecutiveFailures + 1
                 if consecutiveFailures >= 3 {
                     await MainActor.run { [weak self] in
-                        self?.handleKeepaliveFailure()
+                        self?.handleKeepaliveFailure(generation: generation)
                     }
                     return
                 }
@@ -532,25 +543,30 @@ final class SSHSession: Identifiable {
         keepaliveTask = nil
     }
 
+    // 주의: withTaskGroup은 모든 자식이 끝나야 반환되는데, 끊어진 연결에서
+    // executeCommand는 취소에 반응하지 않고 TCP 타임아웃(수 분)까지 매달릴 수 있다.
+    // 그래서 detached task + OnceResolver 레이스로 타임아웃이 즉시 반환되게 한다
+    // (행 걸린 프로브는 백그라운드에 남지만, 연결 종료 시 함께 실패한다).
     private nonisolated static func probeAlive(
         _ clientBox: UncheckedSendableBox<SSHClient>, timeout: Duration
     ) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                (try? await clientBox.value.executeCommand("true")) != nil
+        let resolver = OnceResolver()
+        Task.detached {
+            if (try? await clientBox.value.executeCommand("true")) != nil {
+                resolver.resolve(with: .success(()))
+            } else {
+                resolver.resolve(with: .failure(SSHSessionError.connectionTimeout))
             }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
         }
+        Task.detached {
+            try? await Task.sleep(for: timeout)
+            resolver.resolve(with: .failure(SSHSessionError.connectionTimeout))
+        }
+        return (try? await resolver.wait()) != nil
     }
 
-    private func handleKeepaliveFailure() {
-        guard isConnected else { return }
+    private func handleKeepaliveFailure(generation: Int) {
+        guard generation == connectionGeneration, isConnected else { return }
         isShellRunning = false
         isConnected = false
         state = .disconnected
@@ -656,22 +672,29 @@ final class SSHSession: Identifiable {
     }
 
     func disconnect() async {
+        let generation = connectionGeneration
         statsMonitor.stop()
         stopCWDPolling()
         stopKeepalive()
-        await sftpService.close()
-        if let client {
-            let clientBox = UncheckedSendableBox(value: client)
-            try? await clientBox.value.close()
-        }
-        // 바스티온/중간 클라이언트를 깊은 쪽(마지막)부터 역순으로 닫는다.
-        for c in jumpClients.reversed() {
-            let box = UncheckedSendableBox(value: c)
-            try? await box.value.close()
-        }
+        // 닫는 동안(죽은 연결은 수 초~분 걸릴 수 있다) 재연결이 시작돼도
+        // 새 클라이언트를 건드리지 않도록, await 전에 스냅숏을 떠서 분리한다.
+        let oldClient = client
+        let oldJumpClients = jumpClients
         client = nil
         jumpClients = []
         stdinWriter = nil
+        await sftpService.close()
+        if let oldClient {
+            let clientBox = UncheckedSendableBox(value: oldClient)
+            try? await clientBox.value.close()
+        }
+        // 바스티온/중간 클라이언트를 깊은 쪽(마지막)부터 역순으로 닫는다.
+        for c in oldJumpClients.reversed() {
+            let box = UncheckedSendableBox(value: c)
+            try? await box.value.close()
+        }
+        // 그 사이 connect()가 세대를 올렸다면 새 연결의 상태를 덮어쓰지 않는다.
+        guard connectionGeneration == generation else { return }
         isShellRunning = false
         isConnected = false
         // 이미 끊김 처리된 세션은 더 구체적인 사유 메시지("셸 오류" 등)를 유지한다.

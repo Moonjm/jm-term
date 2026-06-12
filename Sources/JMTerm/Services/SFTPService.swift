@@ -187,6 +187,7 @@ final class SFTPService {
             fileName: fileName, isUpload: true,
             bytesTransferred: 0, totalBytes: totalSize
         )
+        var removedExistingTarget = false
         do {
             var offset: UInt64 = 0
             while true {
@@ -200,11 +201,16 @@ final class SFTPService {
             // SFTP rename은 대상이 존재하면 실패하는 서버가 많아 기존 파일을 먼저 제거한다.
             if (try? await sftp.getAttributes(at: remotePath)) != nil {
                 try? await sftp.remove(at: remotePath)
+                removedExistingTarget = true
             }
             try await sftp.rename(at: partPath, to: remotePath)
         } catch {
             try? await file.close()
-            try? await sftp.remove(at: partPath)
+            // 기존 파일을 이미 지운 뒤 rename만 실패한 경우엔 업로드본(.jmterm-part)을
+            // 남겨 수동 복구가 가능하게 한다. 그 전 단계 실패면 임시 파일을 정리한다.
+            if !removedExistingTarget {
+                try? await sftp.remove(at: partPath)
+            }
             transferProgress = nil
             throw error
         }
@@ -227,10 +233,13 @@ final class SFTPService {
     }
 
     func close() async {
-        if let sftp = sftpClient {
-            try? await sftp.close()
-        }
+        // await 중 재연결의 open()이 새 클라이언트를 넣을 수 있으므로
+        // 먼저 분리한 뒤 닫는다.
+        let old = sftpClient
         sftpClient = nil
         isSFTPReady = false
+        if let old {
+            try? await old.close()
+        }
     }
 }

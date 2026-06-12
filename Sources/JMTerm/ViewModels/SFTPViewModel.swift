@@ -264,6 +264,8 @@ final class SFTPViewModel {
 
                 do {
                     try await session.sftpService.uploadFile(localURL: url, remotePath: remotePath)
+                } catch SFTPTransferError.cancelled {
+                    // 사용자가 취소한 것 — 에러 배너를 띄우지 않는다.
                 } catch {
                     showOperationError("업로드 실패: \(error.localizedDescription)")
                 }
@@ -280,6 +282,8 @@ final class SFTPViewModel {
         Task {
             do {
                 try await session.sftpService.downloadFile(remotePath: node.path, localURL: url)
+            } catch SFTPTransferError.cancelled {
+                // 사용자가 취소한 것 — 에러 배너를 띄우지 않는다.
             } catch {
                 showOperationError("다운로드 실패: \(error.localizedDescription)")
             }

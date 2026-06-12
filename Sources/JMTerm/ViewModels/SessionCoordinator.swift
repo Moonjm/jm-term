@@ -1,5 +1,6 @@
 // Sources/JMTerm/ViewModels/SessionCoordinator.swift
 import Foundation
+import AppKit
 
 @MainActor
 @Observable
@@ -80,7 +81,11 @@ final class SessionCoordinator {
     /// 빠진 것이 있으면 순차 프롬프트한다. 전부 모이면 onReady를 실행한다.
     private func collectCredentials(for conn: ServerConnection, onReady: @escaping (ResolvedCredentials) -> Void) {
         // 이미 자격증명 수집/프롬프트가 진행 중이면 재진입을 무시한다.
-        guard pendingConnectionForCredentials == nil else { return }
+        // 조용히 사라지면 사용자가 클릭이 씹혔다고 느끼므로 비프음으로 알린다.
+        guard pendingConnectionForCredentials == nil else {
+            NSSound.beep()
+            return
+        }
         collectedPasswords = [:]
         passwordQueue = []
         pendingConnectionForCredentials = conn

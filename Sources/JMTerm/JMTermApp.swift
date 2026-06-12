@@ -63,19 +63,24 @@ struct SessionCommands: Commands {
 
             Divider()
 
-            Button("탭 닫기") {
+            Button(coordinator?.activeSession == nil ? "닫기" : "탭 닫기") {
                 if let coordinator, let session = coordinator.activeSession {
                     coordinator.closeSession(session)
+                } else {
+                    NSApp.keyWindow?.performClose(nil)
                 }
             }
             .keyboardShortcut("w", modifiers: .command)
-            .disabled(coordinator?.activeSession == nil)
 
             Button("창 닫기") {
                 closeWindowWithConfirmation()
             }
             .keyboardShortcut("w", modifiers: [.command, .shift])
         }
+
+        // 시스템 기본 Close(⌘W)가 위의 탭 닫기와 중복 표시되지 않도록 제거한다.
+        // 창 닫기는 위의 '닫기/창 닫기' 항목이 대신한다.
+        CommandGroup(replacing: .saveItem) {}
 
         CommandMenu("탭") {
             Button("다음 탭") { coordinator?.cycleTab(by: 1) }
@@ -135,7 +140,10 @@ struct ContentView: View {
         guard tabSwitchMonitor == nil else { return }
         let coordinator = self.coordinator
         tabSwitchMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // Caps Lock이 켜져 있어도 단축키가 동작하도록 비교에서 제외한다.
+            let flags = event.modifierFlags
+                .intersection(.deviceIndependentFlagsMask)
+                .subtracting(.capsLock)
             // 시트(다이얼로그)가 떠 있으면 포커스 이동 등 기본 동작에 맡긴다.
             guard !(event.window?.isSheet ?? false) else { return event }
 
@@ -163,6 +171,15 @@ struct ContentView: View {
             }
 
             return event
+        }
+    }
+
+    /// 창이 닫힐 때 모니터를 해제한다 — 남겨두면 stale coordinator가
+    /// 이벤트를 선점해 새 창의 탭 전환이 조용히 깨진다.
+    private func removeTabSwitchMonitor() {
+        if let tabSwitchMonitor {
+            NSEvent.removeMonitor(tabSwitchMonitor)
+            self.tabSwitchMonitor = nil
         }
     }
 
@@ -296,7 +313,13 @@ struct ContentView: View {
             ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, credentials, persist in
                 coordinator.startSession(connection, credentials: credentials, persistCredentials: persist)
             } onConnectSaved: { connection in
-                coordinator.connectToSaved(connection)
+                // 다이얼로그 시트가 닫히는 중에 비밀번호 프롬프트 시트를 띄우면
+                // 프롬프트가 유실되고 자격증명 수집이 영구히 잠길 수 있다 —
+                // 시트 전환 딜레이(submitPassword와 동일 패턴) 후 시작한다.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    coordinator.connectToSaved(connection)
+                }
             }
         }
         .sheet(item: $coordinator.editingConnection) { conn in
@@ -323,6 +346,7 @@ struct ContentView: View {
         }
         .focusedSceneValue(\.sessionCoordinator, coordinator)
         .onAppear { installTabSwitchMonitor() }
+        .onDisappear { removeTabSwitchMonitor() }
     }
 
     @ViewBuilder

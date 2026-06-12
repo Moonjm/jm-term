@@ -53,6 +53,21 @@ final class ConnectionStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: backup), garbage)
     }
 
+    // 깨진 원소가 객체가 아니라 스칼라(숫자/문자열)여도 뒤따르는 정상 레코드를 복구해야 한다.
+    func testScalarCorruptElementDoesNotAbortRecovery() throws {
+        let good1 = ServerConnection(name: "first", host: "10.0.0.1", username: "u")
+        let good2 = ServerConnection(name: "second", host: "10.0.0.2", username: "u")
+        let encoder = JSONEncoder()
+        let json1 = String(data: try encoder.encode(good1), encoding: .utf8)!
+        let json2 = String(data: try encoder.encode(good2), encoding: .utf8)!
+        let mixed = "[\(json1), 42, \"garbage\", \(json2)]"
+        try Data(mixed.utf8).write(to: fileURL)
+
+        let store = ConnectionStore(fileURL: fileURL)
+        XCTAssertEqual(store.connections.map(\.name), ["first", "second"])
+        XCTAssertEqual(try backupFiles().count, 1)
+    }
+
     // 일부 레코드만 깨진 경우: 정상 레코드는 복구하고 백업본을 남긴다.
     func testPartiallyCorruptFileRecoversValidRecords() throws {
         let good = ServerConnection(name: "good", host: "10.0.0.1", username: "u")
