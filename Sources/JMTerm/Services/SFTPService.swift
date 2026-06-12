@@ -19,6 +19,18 @@ struct TransferProgress {
     }
 }
 
+enum SFTPTransferError: Error, LocalizedError {
+    case busy
+    case cancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .busy: "다른 전송이 진행 중입니다"
+        case .cancelled: "전송이 취소되었습니다"
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class SFTPService {
@@ -27,7 +39,13 @@ final class SFTPService {
     var transferProgress: TransferProgress?
 
     private var sftpClient: SFTPClient?
+    private var cancelRequested = false
     nonisolated private static let chunkSize: UInt32 = 1024 * 1024 // 1MB chunks
+
+    /// 진행 중인 전송을 다음 청크 경계에서 중단한다.
+    func cancelTransfer() {
+        cancelRequested = true
+    }
 
     func open(client: SSHClient) async throws {
         let clientBox = UncheckedSendableBox(value: client)
@@ -78,9 +96,21 @@ final class SFTPService {
 
     var isTransferring: Bool { transferProgress != nil }
 
+    /// 원격 경로에 파일/디렉토리가 존재하는지 확인 (덮어쓰기 확인용).
+    func fileExists(at path: String) async -> Bool {
+        guard let sftp = sftpClient else { return false }
+        return (try? await sftp.getAttributes(at: path)) != nil
+    }
+
+    func createDirectory(at path: String) async throws {
+        guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
+        try await sftp.createDirectory(atPath: path)
+    }
+
     func downloadFile(remotePath: String, localURL: URL) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
-        guard !isTransferring else { return }
+        guard !isTransferring else { throw SFTPTransferError.busy }
+        cancelRequested = false
 
         let fileName = (remotePath as NSString).lastPathComponent
         var totalSize: Int64 = 0
@@ -92,24 +122,38 @@ final class SFTPService {
             bytesTransferred: 0, totalBytes: totalSize
         )
 
+        // .part 임시 파일에 받고 완성된 뒤에만 최종 위치로 이동 —
+        // 중간 실패 시 기존 로컬 파일이 잘린 채 파괴되지 않도록.
+        let partURL = localURL.appendingPathExtension("part")
         let file = try await sftp.openFile(filePath: remotePath, flags: .read)
         do {
-            FileManager.default.createFile(atPath: localURL.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: localURL)
-            defer { handle.closeFile() }
-
-            var offset: UInt64 = 0
-            while true {
-                let chunk = try await file.read(from: offset, length: Self.chunkSize)
-                let data = Data(buffer: chunk)
-                if data.isEmpty { break }
-                handle.write(data)
-                offset += UInt64(data.count)
-                transferProgress?.bytesTransferred = Int64(offset)
+            FileManager.default.createFile(atPath: partURL.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: partURL)
+            do {
+                var offset: UInt64 = 0
+                while true {
+                    if cancelRequested { throw SFTPTransferError.cancelled }
+                    let chunk = try await file.read(from: offset, length: Self.chunkSize)
+                    let data = Data(buffer: chunk)
+                    if data.isEmpty { break }
+                    try handle.write(contentsOf: data)
+                    offset += UInt64(data.count)
+                    transferProgress?.bytesTransferred = Int64(offset)
+                }
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
             }
             try await file.close()
+            if FileManager.default.fileExists(atPath: localURL.path) {
+                _ = try FileManager.default.replaceItemAt(localURL, withItemAt: partURL)
+            } else {
+                try FileManager.default.moveItem(at: partURL, to: localURL)
+            }
         } catch {
             try? await file.close()
+            try? FileManager.default.removeItem(at: partURL)
             transferProgress = nil
             throw error
         }
@@ -118,7 +162,8 @@ final class SFTPService {
 
     func uploadFile(localURL: URL, remotePath: String) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
-        guard !isTransferring else { return }
+        guard !isTransferring else { throw SFTPTransferError.busy }
+        cancelRequested = false
 
         let fileName = localURL.lastPathComponent
         let fileAttrs = try FileManager.default.attributesOfItem(atPath: localURL.path)
@@ -133,22 +178,37 @@ final class SFTPService {
             bytesTransferred: 0, totalBytes: totalSize
         )
 
-        let localHandle = try FileHandle(forReadingFrom: localURL)
-        defer { localHandle.closeFile() }
+        let localHandle: FileHandle
+        do {
+            localHandle = try FileHandle(forReadingFrom: localURL)
+        } catch {
+            transferProgress = nil
+            throw error
+        }
+        defer { try? localHandle.close() }
 
-        let file = try await sftp.openFile(filePath: remotePath, flags: [.write, .create, .truncate])
+        // 원격도 임시 이름에 올린 뒤 rename — 중간 실패 시 기존 원격 파일이
+        // 잘린 채 남지 않도록.
+        let partPath = remotePath + ".jmterm-part"
+        let file = try await sftp.openFile(filePath: partPath, flags: [.write, .create, .truncate])
         do {
             var offset: UInt64 = 0
             while true {
-                let data = localHandle.readData(ofLength: Int(Self.chunkSize))
-                if data.isEmpty { break }
+                if cancelRequested { throw SFTPTransferError.cancelled }
+                guard let data = try localHandle.read(upToCount: Int(Self.chunkSize)), !data.isEmpty else { break }
                 try await file.write(ByteBuffer(data: data), at: offset)
                 offset += UInt64(data.count)
                 transferProgress?.bytesTransferred = Int64(offset)
             }
             try await file.close()
+            // SFTP rename은 대상이 존재하면 실패하는 서버가 많아 기존 파일을 먼저 제거한다.
+            if (try? await sftp.getAttributes(at: remotePath)) != nil {
+                try? await sftp.remove(at: remotePath)
+            }
+            try await sftp.rename(at: partPath, to: remotePath)
         } catch {
             try? await file.close()
+            try? await sftp.remove(at: partPath)
             transferProgress = nil
             throw error
         }

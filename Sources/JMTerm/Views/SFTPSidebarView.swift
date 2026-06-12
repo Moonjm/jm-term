@@ -25,6 +25,18 @@ struct SFTPSidebarView: View {
                             viewModel.navigateTo(viewModel.editingPath)
                         }
 
+                    Button(action: { viewModel.createFolder() }) {
+                        Image(systemName: "folder.badge.plus")
+                    }
+                    .buttonStyle(.plain)
+                    .help("새 폴더")
+
+                    Button(action: { viewModel.showHiddenFiles.toggle() }) {
+                        Image(systemName: viewModel.showHiddenFiles ? "eye" : "eye.slash")
+                    }
+                    .buttonStyle(.plain)
+                    .help(viewModel.showHiddenFiles ? "숨김 파일 감추기" : "숨김 파일 보기")
+
                     Button(action: { Task { await viewModel.loadDirectory() } }) {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -95,12 +107,12 @@ struct SFTPSidebarView: View {
                             }
                             .padding(4)
                         }
-                        .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
-                            viewModel.handleDrop(providers)
-                            return true
-                        }
-                        .border(viewModel.isDropTargeted ? Color.accentColor : Color.clear, width: 2)
                         .contextMenu {
+                            Button("새 폴더") { viewModel.createFolder() }
+                            Button(viewModel.showHiddenFiles ? "숨김 파일 감추기" : "숨김 파일 보기") {
+                                viewModel.showHiddenFiles.toggle()
+                            }
+                            Divider()
                             Button("새로고침") {
                                 Task { await viewModel.loadDirectory() }
                             }
@@ -109,15 +121,60 @@ struct SFTPSidebarView: View {
                 }
                 .frame(maxHeight: .infinity)
                 .clipped()
+                // 드롭 영역은 빈 디렉토리·에러 상태에서도 동작해야 하므로
+                // ScrollView가 아니라 목록 컨테이너 전체에 붙인다.
+                .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
+                    viewModel.handleDrop(providers)
+                    return true
+                }
+                .border(viewModel.isDropTargeted ? Color.accentColor : Color.clear, width: 2)
             }
 
-            TransferProgressBar(sftpService: viewModel.session.sftpService)
+            VStack(spacing: 0) {
+                if let operationError = viewModel.operationError {
+                    OperationErrorBanner(message: operationError) {
+                        viewModel.operationError = nil
+                    }
+                }
+                TransferProgressBar(sftpService: viewModel.session.sftpService)
+            }
         }
         .task {
             await viewModel.initialLoad()
         }
         .onChange(of: viewModel.session.currentPath) { _, newPath in
             viewModel.handlePathChange(newPath)
+        }
+    }
+}
+
+// MARK: - Operation Error Banner
+
+/// 개별 작업 실패를 목록을 가리지 않고 일시적으로 알리는 배너.
+struct OperationErrorBanner: View {
+    let message: String
+    var onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption2)
+                    .lineLimit(2)
+                Spacer()
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.orange.opacity(0.12))
         }
     }
 }
@@ -154,6 +211,14 @@ struct TransferProgressBar: View {
                         .font(.caption2)
                         .monospacedDigit()
                         .frame(width: 32, alignment: .trailing)
+
+                    Button(action: { sftpService.cancelTransfer() }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .help("전송 취소")
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
