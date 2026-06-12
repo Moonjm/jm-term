@@ -35,6 +35,15 @@ final class SessionCoordinator {
         sessions.first { $0.id == activeSessionID }
     }
 
+    /// 활성 탭을 앞/뒤로 순환 이동한다 (⌃⇥ / ⌃⇧⇥).
+    func cycleTab(by offset: Int) {
+        guard sessions.count > 1,
+              let current = sessions.firstIndex(where: { $0.id == activeSessionID })
+        else { return }
+        let next = (current + offset + sessions.count) % sessions.count
+        activeSessionID = sessions[next].id
+    }
+
     var isFilesTabAvailable: Bool {
         activeSession?.isSFTPReady == true
     }

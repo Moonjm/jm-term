@@ -78,12 +78,12 @@ struct SessionCommands: Commands {
         }
 
         CommandMenu("탭") {
-            Button("다음 탭") { cycleTab(by: 1) }
-                .keyboardShortcut("]", modifiers: [.command, .shift])
+            Button("다음 탭") { coordinator?.cycleTab(by: 1) }
+                .keyboardShortcut(.tab, modifiers: .control)
                 .disabled((coordinator?.sessions.count ?? 0) < 2)
 
-            Button("이전 탭") { cycleTab(by: -1) }
-                .keyboardShortcut("[", modifiers: [.command, .shift])
+            Button("이전 탭") { coordinator?.cycleTab(by: -1) }
+                .keyboardShortcut(.tab, modifiers: [.control, .shift])
                 .disabled((coordinator?.sessions.count ?? 0) < 2)
 
             Divider()
@@ -98,15 +98,6 @@ struct SessionCommands: Commands {
                 .disabled(index > (coordinator?.sessions.count ?? 0))
             }
         }
-    }
-
-    private func cycleTab(by offset: Int) {
-        guard let coordinator, coordinator.sessions.count > 1,
-              let current = coordinator.sessions.firstIndex(where: { $0.id == coordinator.activeSessionID })
-        else { return }
-        let count = coordinator.sessions.count
-        let next = (current + offset + count) % count
-        coordinator.activeSessionID = coordinator.sessions[next].id
     }
 
     private func closeWindowWithConfirmation() {
@@ -132,9 +123,30 @@ enum SidebarTab {
 
 struct ContentView: View {
     @State private var coordinator: SessionCoordinator
+    @State private var tabSwitchMonitor: Any?
 
     init(connectionStore: ConnectionStore) {
         _coordinator = State(initialValue: SessionCoordinator(connectionStore: connectionStore))
+    }
+
+    /// ⌃⇥ / ⌃⇧⇥ 탭 전환. 터미널 뷰가 키 입력을 선점하므로 메뉴 단축키에만
+    /// 의존하지 않고 이벤트 모니터로 직접 처리한다.
+    private func installTabSwitchMonitor() {
+        guard tabSwitchMonitor == nil else { return }
+        let coordinator = self.coordinator
+        tabSwitchMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 48 else { return event }   // 48 = Tab
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags == .control || flags == [.control, .shift] else { return event }
+            // 시트(다이얼로그)가 떠 있으면 포커스 이동 등 기본 동작에 맡긴다.
+            guard !(event.window?.isSheet ?? false) else { return event }
+            let handled = MainActor.assumeIsolated { () -> Bool in
+                guard coordinator.sessions.count > 1 else { return false }
+                coordinator.cycleTab(by: flags.contains(.shift) ? -1 : 1)
+                return true
+            }
+            return handled ? nil : event
+        }
     }
 
     var body: some View {
@@ -266,6 +278,8 @@ struct ContentView: View {
         .sheet(isPresented: $coordinator.showConnectionDialog) {
             ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, credentials, persist in
                 coordinator.startSession(connection, credentials: credentials, persistCredentials: persist)
+            } onConnectSaved: { connection in
+                coordinator.connectToSaved(connection)
             }
         }
         .sheet(item: $coordinator.editingConnection) { conn in
@@ -291,6 +305,7 @@ struct ContentView: View {
             coordinator.sidebarTab = available ? .files : .servers
         }
         .focusedSceneValue(\.sessionCoordinator, coordinator)
+        .onAppear { installTabSwitchMonitor() }
     }
 
     @ViewBuilder
