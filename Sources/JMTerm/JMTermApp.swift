@@ -129,23 +129,40 @@ struct ContentView: View {
         _coordinator = State(initialValue: SessionCoordinator(connectionStore: connectionStore))
     }
 
-    /// ⌃⇥ / ⌃⇧⇥ 탭 전환. 터미널 뷰가 키 입력을 선점하므로 메뉴 단축키에만
-    /// 의존하지 않고 이벤트 모니터로 직접 처리한다.
+    /// ⌃⇥ / ⌃⇧⇥ 순환 이동, ⌃1~9 직접 이동. 터미널 뷰가 키 입력을 선점하므로
+    /// 메뉴 단축키에만 의존하지 않고 이벤트 모니터로 직접 처리한다.
     private func installTabSwitchMonitor() {
         guard tabSwitchMonitor == nil else { return }
         let coordinator = self.coordinator
         tabSwitchMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard event.keyCode == 48 else { return event }   // 48 = Tab
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard flags == .control || flags == [.control, .shift] else { return event }
             // 시트(다이얼로그)가 떠 있으면 포커스 이동 등 기본 동작에 맡긴다.
             guard !(event.window?.isSheet ?? false) else { return event }
-            let handled = MainActor.assumeIsolated { () -> Bool in
-                guard coordinator.sessions.count > 1 else { return false }
-                coordinator.cycleTab(by: flags.contains(.shift) ? -1 : 1)
-                return true
+
+            // ⌃⇥ / ⌃⇧⇥ — 탭 순환
+            if event.keyCode == 48, flags == .control || flags == [.control, .shift] {   // 48 = Tab
+                let handled = MainActor.assumeIsolated { () -> Bool in
+                    guard coordinator.sessions.count > 1 else { return false }
+                    coordinator.cycleTab(by: flags.contains(.shift) ? -1 : 1)
+                    return true
+                }
+                return handled ? nil : event
             }
-            return handled ? nil : event
+
+            // ⌃1~⌃9 — 해당 번호 탭으로 직접 이동
+            if flags == .control,
+               let chars = event.charactersIgnoringModifiers,
+               chars.count == 1,
+               let digit = Int(chars), (1...9).contains(digit) {
+                let handled = MainActor.assumeIsolated { () -> Bool in
+                    guard digit <= coordinator.sessions.count else { return false }
+                    coordinator.activeSessionID = coordinator.sessions[digit - 1].id
+                    return true
+                }
+                return handled ? nil : event
+            }
+
+            return event
         }
     }
 
