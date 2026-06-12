@@ -36,7 +36,7 @@ struct TerminalViewWrapper: NSViewRepresentable {
             for _ in 0..<100 {
                 if session.isConnected { break }
                 try await Task.sleep(for: .milliseconds(100))
-                if session.statusMessage.contains("실패") { return }
+                if session.state == .disconnected { return }   // 연결 실패 — 재연결 UI에 맡김
             }
             guard session.isConnected else {
                 session.statusMessage = "연결 시간 초과"
@@ -87,7 +87,7 @@ struct TerminalViewWrapper: NSViewRepresentable {
                 for _ in 0..<100 {
                     if session.isConnected { break }
                     try await Task.sleep(for: .milliseconds(100))
-                    if session.statusMessage.contains("실패") { return }
+                    if session.state == .disconnected { return }   // 연결 실패 — 재연결 UI에 맡김
                 }
                 guard session.isConnected else {
                     session.statusMessage = "연결 시간 초과"

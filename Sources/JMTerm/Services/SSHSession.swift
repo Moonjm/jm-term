@@ -62,12 +62,20 @@ final class ManagedCriticalState<State>: @unchecked Sendable {
     }
 }
 
+/// 세션의 수명 주기 상태. statusMessage 문자열 매칭 대신 이 값으로 분기한다.
+enum SessionState: Equatable, Sendable {
+    case connecting
+    case connected
+    case disconnected
+}
+
 @MainActor
 @Observable
 final class SSHSession: Identifiable {
     let id = UUID()
     let connection: ServerConnection
     var isConnected = false
+    var state: SessionState = .connecting
     var statusMessage = "연결 대기 중"
     let statsMonitor = StatsMonitor()
     let sftpService = SFTPService()
@@ -88,6 +96,8 @@ final class SSHSession: Identifiable {
     private var jumpClients: [SSHClient] = []
     private var stdinWriter: TTYStdinWriter?
     private var cwdPollingTask: Task<Void, Never>?
+    private var keepaliveTask: Task<Void, Never>?
+    private var isShellRunning = false
     weak var terminalView: TerminalView?
 
     init(connection: ServerConnection) {
@@ -136,9 +146,15 @@ final class SSHSession: Identifiable {
         }
     }
 
+    /// 기본은 NIOSSH 보안 기본값. `.all`은 SHA-1 KEX 등 레거시 알고리즘까지 켜서
+    /// 다운그레이드 공격에 노출되므로, 사용자가 명시적으로 허용한 연결에만 쓴다.
+    private nonisolated static func algorithms(for connection: ServerConnection) -> SSHAlgorithms {
+        connection.allowLegacyAlgorithms ? .all : SSHAlgorithms()
+    }
+
     private nonisolated static func makeJumpSettings(
         host: String, port: Int, authMethod: AuthMethod, username: String,
-        password: String?, validator: SSHHostKeyValidator
+        password: String?, validator: SSHHostKeyValidator, algorithms: SSHAlgorithms
     ) throws -> SSHClientSettings {
         let authClosure = try makeAuthClosure(authMethod: authMethod, username: username, password: password)
         var settings = SSHClientSettings(
@@ -146,16 +162,23 @@ final class SSHSession: Identifiable {
             authenticationMethod: authClosure,
             hostKeyValidator: validator
         )
-        settings.algorithms = .all
+        settings.algorithms = algorithms
         return settings
     }
 
     func connect(credentials: ResolvedCredentials) async throws {
+        state = .connecting
         statusMessage = "연결 중..."
-        if connection.jumpHosts.isEmpty {
-            try await connectDirect(password: credentials.passwords[connection.id])
-        } else {
-            try await connectViaJumpChain(credentials: credentials)
+        do {
+            if connection.jumpHosts.isEmpty {
+                try await connectDirect(password: credentials.passwords[connection.id])
+            } else {
+                try await connectViaJumpChain(credentials: credentials)
+            }
+            state = .connected
+        } catch {
+            state = .disconnected
+            throw error
         }
     }
 
@@ -173,7 +196,7 @@ final class SSHSession: Identifiable {
                     authenticationMethod: authMethod,
                     hostKeyValidator: hostKeyValidator,
                     reconnect: .never,
-                    algorithms: .all
+                    algorithms: Self.algorithms(for: connection)
                 )
                 break
             } catch {
@@ -207,7 +230,7 @@ final class SSHSession: Identifiable {
                 authenticationMethod: firstAuth,
                 hostKeyValidator: buildHostKeyValidator(host: first.host, port: first.port),
                 reconnect: .never,
-                algorithms: .all
+                algorithms: Self.algorithms(for: connection)
             )
             clients.append(firstClient)
 
@@ -217,7 +240,8 @@ final class SSHSession: Identifiable {
                 let settings = try Self.makeJumpSettings(
                     host: hop.host, port: hop.port, authMethod: hop.authMethod,
                     username: hop.username, password: credentials.passwords[hop.id],
-                    validator: buildHostKeyValidator(host: hop.host, port: hop.port)
+                    validator: buildHostKeyValidator(host: hop.host, port: hop.port),
+                    algorithms: Self.algorithms(for: connection)
                 )
                 statusMessage = "경유 연결 중: \(hop.host)"
                 let next = try await current.jump(to: settings)
@@ -229,7 +253,8 @@ final class SSHSession: Identifiable {
             let targetSettings = try Self.makeJumpSettings(
                 host: connection.host, port: connection.port, authMethod: connection.authMethod,
                 username: connection.username, password: credentials.passwords[connection.id],
-                validator: buildHostKeyValidator(host: connection.host, port: connection.port)
+                validator: buildHostKeyValidator(host: connection.host, port: connection.port),
+                algorithms: Self.algorithms(for: connection)
             )
             statusMessage = "내부 서버 연결 중: \(connection.host)"
             let targetClient = try await current.jump(to: targetSettings)
@@ -263,23 +288,30 @@ final class SSHSession: Identifiable {
 
     // 프롬프트 없이 known_hosts 만으로 검증 (testConnection 용).
     //
-    // 보안 주의: testConnection은 UI를 띄우지 않는 도달성/인증 확인 용도라,
-    // known_hosts에 없는(=처음 보는) 호스트 키는 acceptAnything으로 통과시킨다.
-    // 즉 "테스트 성공"은 도달 가능·인증 성공을 뜻할 뿐, 호스트 키가 검증/신뢰됐다는
-    // 의미가 아니다(특히 바스티온이 MITM에 노출될 수 있음). 실제 연결 경로는
-    // buildHostKeyValidator(host:port:)로 미지/불일치 키를 사용자에게 프롬프트해
-    // 정상 검증한다.
-    private nonisolated static func nonPromptingValidator(host: String, port: Int) -> SSHHostKeyValidator {
+    // 보안 주의: SSH 인증(비밀번호 전송)은 호스트 키 교환 *이후*에 일어난다.
+    // 미등록 호스트를 무조건 수락하면 MITM이 평문 비밀번호를 그대로 받게 되므로,
+    // 비밀번호 인증 + 미등록 호스트 조합은 즉시 실패시킨다 (정식 연결로 키를
+    // 저장한 뒤 테스트 가능). 공개키 인증은 세션 ID에 종속된 서명만 보내므로
+    // 자격증명이 유출되지 않아 미등록 호스트도 도달성 테스트를 허용한다.
+    private nonisolated static func nonPromptingValidator(
+        host: String, port: Int, authMethod: AuthMethod
+    ) -> SSHHostKeyValidator {
         let status = KnownHostsManager.lookup(host: host, port: port)
         if case .trusted(let keys) = status {
             return .trustedKeys(keys)
+        }
+        if case .password = authMethod {
+            return .custom(RejectingHostKeyDelegate())
         }
         return .acceptAnything()
     }
 
     func startShell() async throws {
+        // 탭 전환 폴링과 재연결 경로가 동시에 호출해도 PTY 채널이 중복 생성되지 않게.
+        guard !isShellRunning else { return }
         guard let client else { return }
         guard let terminalView else { return }
+        isShellRunning = true
 
         // /etc/motd 와 /run/motd.dynamic 을 SFTP로 직접 읽어 표시.
         // 일부 sshd/PAM 조합이 우리 세션에 대해 MOTD를 emit하지 않는 경우가 있어,
@@ -337,26 +369,29 @@ final class SSHSession: Identifiable {
                     }
 
                     await MainActor.run {
-                        sessionBox.value.isConnected = false
-                        sessionBox.value.statusMessage = "연결 종료됨"
-                        NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
+                        sessionBox.value.markShellEnded(message: "연결 종료됨")
                     }
                 }
             } catch is CancellationError {
                 await MainActor.run {
-                    sessionBox.value.isConnected = false
-                    sessionBox.value.statusMessage = "연결 종료됨"
-                    NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
+                    sessionBox.value.markShellEnded(message: "연결 종료됨")
                 }
             } catch {
                 Logger.app.error("셸 오류: \(error)")
                 await MainActor.run {
-                    sessionBox.value.isConnected = false
-                    sessionBox.value.statusMessage = "셸 오류: \(error.localizedDescription)"
-                    NotificationCenter.default.post(name: .sshSessionEnded, object: sessionBox.value.id)
+                    sessionBox.value.markShellEnded(message: "셸 오류: \(error.localizedDescription)")
                 }
             }
         }
+    }
+
+    /// PTY 스트림이 끝났을 때 공통 정리: 상태 전이 + 종료 알림.
+    private func markShellEnded(message: String) {
+        isShellRunning = false
+        isConnected = false
+        state = .disconnected
+        statusMessage = message
+        NotificationCenter.default.post(name: .sshSessionEnded, object: id)
     }
 
     func sendToShell(_ data: Data) {
@@ -463,6 +498,65 @@ final class SSHSession: Identifiable {
         cwdPollingTask = nil
     }
 
+    // MARK: - Keepalive
+    //
+    // NAT/방화벽 뒤에서 유휴 세션이 조용히 끊기는 것을 감지한다. 30초마다 가벼운
+    // 원격 명령으로 응답을 확인하고, 3회 연속 무응답이면 세션을 끊긴 것으로 처리한다.
+
+    func startKeepalive() {
+        guard let client else { return }
+        let clientBox = UncheckedSendableBox(value: client)
+
+        keepaliveTask?.cancel()
+        keepaliveTask = Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                if Task.isCancelled { return }
+                let alive = await Self.probeAlive(clientBox, timeout: .seconds(10))
+                if Task.isCancelled { return }
+                consecutiveFailures = alive ? 0 : consecutiveFailures + 1
+                if consecutiveFailures >= 3 {
+                    await MainActor.run { [weak self] in
+                        self?.handleKeepaliveFailure()
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    func stopKeepalive() {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
+    }
+
+    private nonisolated static func probeAlive(
+        _ clientBox: UncheckedSendableBox<SSHClient>, timeout: Duration
+    ) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                (try? await clientBox.value.executeCommand("true")) != nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private func handleKeepaliveFailure() {
+        guard isConnected else { return }
+        isShellRunning = false
+        isConnected = false
+        state = .disconnected
+        statusMessage = "연결 끊김 (서버 응답 없음)"
+        NotificationCenter.default.post(name: .sshSessionEnded, object: id)
+    }
+
     // MARK: - Test Connection
 
     /// 직접 또는 체인 연결을 시도하고 즉시 닫아 도달성을 검증한다. 프롬프트 없음.
@@ -484,8 +578,8 @@ final class SSHSession: Identifiable {
                     let client = try await SSHClient.connect(
                         host: conn.host, port: conn.port,
                         authenticationMethod: auth,
-                        hostKeyValidator: nonPromptingValidator(host: conn.host, port: conn.port),
-                        reconnect: .never, algorithms: .all
+                        hostKeyValidator: nonPromptingValidator(host: conn.host, port: conn.port, authMethod: conn.authMethod),
+                        reconnect: .never, algorithms: algorithms(for: conn)
                     )
                     try? await client.close()
                 } else {
@@ -499,8 +593,8 @@ final class SSHSession: Identifiable {
                         let firstClient = try await SSHClient.connect(
                             host: first.host, port: first.port,
                             authenticationMethod: firstAuth,
-                            hostKeyValidator: nonPromptingValidator(host: first.host, port: first.port),
-                            reconnect: .never, algorithms: .all
+                            hostKeyValidator: nonPromptingValidator(host: first.host, port: first.port, authMethod: first.authMethod),
+                            reconnect: .never, algorithms: algorithms(for: conn)
                         )
                         openClients.append(firstClient)
                         var current = firstClient
@@ -508,7 +602,8 @@ final class SSHSession: Identifiable {
                             let settings = try makeJumpSettings(
                                 host: hop.host, port: hop.port, authMethod: hop.authMethod,
                                 username: hop.username, password: creds.passwords[hop.id],
-                                validator: nonPromptingValidator(host: hop.host, port: hop.port)
+                                validator: nonPromptingValidator(host: hop.host, port: hop.port, authMethod: hop.authMethod),
+                                algorithms: algorithms(for: conn)
                             )
                             let next = try await current.jump(to: settings)
                             openClients.append(next)
@@ -517,7 +612,8 @@ final class SSHSession: Identifiable {
                         let targetSettings = try makeJumpSettings(
                             host: conn.host, port: conn.port, authMethod: conn.authMethod,
                             username: conn.username, password: creds.passwords[conn.id],
-                            validator: nonPromptingValidator(host: conn.host, port: conn.port)
+                            validator: nonPromptingValidator(host: conn.host, port: conn.port, authMethod: conn.authMethod),
+                            algorithms: algorithms(for: conn)
                         )
                         let targetClient = try await current.jump(to: targetSettings)
                         try? await targetClient.close()
@@ -561,6 +657,7 @@ final class SSHSession: Identifiable {
     func disconnect() async {
         statsMonitor.stop()
         stopCWDPolling()
+        stopKeepalive()
         await sftpService.close()
         if let client {
             let clientBox = UncheckedSendableBox(value: client)
@@ -574,8 +671,11 @@ final class SSHSession: Identifiable {
         client = nil
         jumpClients = []
         stdinWriter = nil
+        isShellRunning = false
         isConnected = false
-        statusMessage = "연결 끊김"
+        // 이미 끊김 처리된 세션은 더 구체적인 사유 메시지("셸 오류" 등)를 유지한다.
+        if state != .disconnected { statusMessage = "연결 끊김" }
+        state = .disconnected
         statsMonitor.stats = nil
     }
 }
@@ -674,6 +774,7 @@ enum SSHSessionError: Error, LocalizedError {
     case unsupportedKeyType(String)
     case invalidKeyFormat
     case hostKeyRejected
+    case hostKeyUnverified
     case connectionTimeout
 
     var errorDescription: String? {
@@ -683,8 +784,17 @@ enum SSHSessionError: Error, LocalizedError {
         case .unsupportedKeyType(let type): "지원하지 않는 키 유형: \(type)"
         case .invalidKeyFormat: "잘못된 키 형식입니다"
         case .hostKeyRejected: "호스트 키가 거부되었습니다"
+        case .hostKeyUnverified: "등록되지 않은 호스트 키입니다"
         case .connectionTimeout: "연결 시간이 초과되었습니다"
         }
+    }
+}
+
+/// 프롬프트 없이 미등록 호스트 키를 무조건 거부하는 검증 델리게이트.
+/// testConnection의 비밀번호 인증 경로에서 자격증명 유출(MITM)을 막는다.
+private final class RejectingHostKeyDelegate: NIOSSHClientServerAuthenticationDelegate, Sendable {
+    func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+        validationCompletePromise.fail(SSHSessionError.hostKeyUnverified)
     }
 }
 

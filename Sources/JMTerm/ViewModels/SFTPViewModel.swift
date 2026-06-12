@@ -42,7 +42,7 @@ final class SFTPViewModel {
         for _ in 0..<50 {
             if session.sftpService.isSFTPReady { break }
             try? await Task.sleep(for: .milliseconds(200))
-            if session.statusMessage.contains("실패") { return }
+            if session.state == .disconnected { return }
         }
         guard session.sftpService.isSFTPReady else { return }
         trackedPath = session.currentPath

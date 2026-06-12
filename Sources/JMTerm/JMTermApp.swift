@@ -21,6 +21,107 @@ struct JMTermApp: App {
                 }
         }
         .defaultSize(width: 1200, height: 800)
+        .commands {
+            SessionCommands()
+        }
+    }
+}
+
+// MARK: - 메뉴 커맨드 & 단축키
+
+private struct SessionCoordinatorFocusedKey: FocusedValueKey {
+    typealias Value = SessionCoordinator
+}
+
+extension FocusedValues {
+    var sessionCoordinator: SessionCoordinator? {
+        get { self[SessionCoordinatorFocusedKey.self] }
+        set { self[SessionCoordinatorFocusedKey.self] = newValue }
+    }
+}
+
+/// 터미널 앱 표준 단축키: ⌘W는 창이 아니라 탭을 닫는다.
+/// (⌘W 항목이 비활성일 때는 시스템 기본 Close(창 닫기)로 넘어간다)
+struct SessionCommands: Commands {
+    @FocusedValue(\.sessionCoordinator) private var coordinator
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("새 연결...") {
+                coordinator?.showConnectionDialog = true
+            }
+            .keyboardShortcut("t", modifiers: .command)
+            .disabled(coordinator == nil)
+
+            Button("재연결") {
+                if let coordinator, let session = coordinator.activeSession {
+                    coordinator.reconnect(session)
+                }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(coordinator?.activeSession?.state != .disconnected)
+
+            Divider()
+
+            Button("탭 닫기") {
+                if let coordinator, let session = coordinator.activeSession {
+                    coordinator.closeSession(session)
+                }
+            }
+            .keyboardShortcut("w", modifiers: .command)
+            .disabled(coordinator?.activeSession == nil)
+
+            Button("창 닫기") {
+                closeWindowWithConfirmation()
+            }
+            .keyboardShortcut("w", modifiers: [.command, .shift])
+        }
+
+        CommandMenu("탭") {
+            Button("다음 탭") { cycleTab(by: 1) }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+                .disabled((coordinator?.sessions.count ?? 0) < 2)
+
+            Button("이전 탭") { cycleTab(by: -1) }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+                .disabled((coordinator?.sessions.count ?? 0) < 2)
+
+            Divider()
+
+            ForEach(1...9, id: \.self) { index in
+                Button("탭 \(index)") {
+                    if let coordinator, index <= coordinator.sessions.count {
+                        coordinator.activeSessionID = coordinator.sessions[index - 1].id
+                    }
+                }
+                .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
+                .disabled(index > (coordinator?.sessions.count ?? 0))
+            }
+        }
+    }
+
+    private func cycleTab(by offset: Int) {
+        guard let coordinator, coordinator.sessions.count > 1,
+              let current = coordinator.sessions.firstIndex(where: { $0.id == coordinator.activeSessionID })
+        else { return }
+        let count = coordinator.sessions.count
+        let next = (current + offset + count) % count
+        coordinator.activeSessionID = coordinator.sessions[next].id
+    }
+
+    private func closeWindowWithConfirmation() {
+        guard let window = NSApp.keyWindow else { return }
+        let liveCount = coordinator?.sessions.filter(\.isConnected).count ?? 0
+        if liveCount > 0 {
+            let alert = NSAlert()
+            alert.messageText = "창을 닫으시겠습니까?"
+            alert.informativeText = "연결 중인 세션 \(liveCount)개가 모두 종료됩니다."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "닫기")
+            alert.addButton(withTitle: "취소")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        window.performClose(nil)
     }
 }
 
@@ -72,7 +173,30 @@ struct ContentView: View {
                     }
 
                     if let session = coordinator.activeSession {
-                        TerminalViewWrapper(session: session)
+                        ZStack(alignment: .top) {
+                            TerminalViewWrapper(session: session)
+
+                            // 끊긴 세션: 버퍼는 그대로 보여주고 재연결 수단을 제공한다.
+                            if session.state == .disconnected {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "bolt.slash.fill")
+                                        .foregroundStyle(.red)
+                                    Text(session.statusMessage)
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button("재연결 (⌘R)") { coordinator.reconnect(session) }
+                                        .buttonStyle(.borderedProminent)
+                                        .controlSize(.small)
+                                    Button("탭 닫기") { coordinator.closeSession(session) }
+                                        .controlSize(.small)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color(white: 0.15).opacity(0.95))
+                                .overlay(alignment: .bottom) { Divider() }
+                            }
+                        }
                     } else {
                         VStack(spacing: 12) {
                             Image(systemName: "terminal")
@@ -166,6 +290,7 @@ struct ContentView: View {
         .onChange(of: coordinator.isFilesTabAvailable) { _, available in
             coordinator.sidebarTab = available ? .files : .servers
         }
+        .focusedSceneValue(\.sessionCoordinator, coordinator)
     }
 
     @ViewBuilder
@@ -184,6 +309,17 @@ struct ContentView: View {
             .background(Color(white: 0.12))
 
             Divider()
+
+            // connections.json 손상 복구 안내 (백업 경로 포함)
+            if let failure = coordinator.connectionStore.loadFailureMessage {
+                Label(failure, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.1))
+                Divider()
+            }
 
             if coordinator.connectionStore.connections.isEmpty {
                 VStack {

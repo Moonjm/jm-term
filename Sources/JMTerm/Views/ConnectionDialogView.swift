@@ -15,6 +15,7 @@ struct ConnectionDialogView: View {
     @State private var useKey = false
     @State private var keyPath = "~/.ssh/id_ed25519"
     @State private var jumpDrafts: [JumpHostDraft] = []
+    @State private var allowLegacy = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -25,7 +26,8 @@ struct ConnectionDialogView: View {
                 name: $name, host: $host, port: $port,
                 username: $username, password: $password,
                 useKey: $useKey, keyPath: $keyPath,
-                jumpDrafts: $jumpDrafts
+                jumpDrafts: $jumpDrafts,
+                allowLegacy: $allowLegacy
             )
 
             HStack {
@@ -51,7 +53,8 @@ struct ConnectionDialogView: View {
             port: Int(port) ?? 22,
             username: username,
             authMethod: authMethod,
-            jumpHosts: jumpDrafts.map { $0.toJumpHost() }
+            jumpHosts: jumpDrafts.map { $0.toJumpHost() },
+            allowLegacyAlgorithms: allowLegacy
         )
 
         var passwords: [UUID: String] = [:]

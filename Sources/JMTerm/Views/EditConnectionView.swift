@@ -14,6 +14,7 @@ struct EditConnectionView: View {
     @State private var useKey: Bool
     @State private var keyPath: String
     @State private var jumpDrafts: [JumpHostDraft]
+    @State private var allowLegacy: Bool
 
     init(connectionStore: ConnectionStore, connection: ServerConnection) {
         self.connectionStore = connectionStore
@@ -33,6 +34,7 @@ struct EditConnectionView: View {
         _jumpDrafts = State(initialValue: connection.jumpHosts.map { hop in
             JumpHostDraft(from: hop, password: connectionStore.loadPassword(account: hop.keychainAccount) ?? "")
         })
+        _allowLegacy = State(initialValue: connection.allowLegacyAlgorithms)
     }
 
     var body: some View {
@@ -44,7 +46,8 @@ struct EditConnectionView: View {
                 name: $name, host: $host, port: $port,
                 username: $username, password: $password,
                 useKey: $useKey, keyPath: $keyPath,
-                jumpDrafts: $jumpDrafts
+                jumpDrafts: $jumpDrafts,
+                allowLegacy: $allowLegacy
             )
 
             HStack {
@@ -71,6 +74,7 @@ struct EditConnectionView: View {
         updated.username = username
         updated.authMethod = authMethod
         updated.jumpHosts = jumpDrafts.map { $0.toJumpHost() }
+        updated.allowLegacyAlgorithms = allowLegacy
 
         connectionStore.update(updated)
 

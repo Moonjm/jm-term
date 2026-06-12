@@ -13,6 +13,8 @@ final class SessionCoordinator {
     private var passwordQueue: [PasswordRequest] = []
     private var collectedPasswords: [UUID: String] = [:]
     private var pendingConnectionForCredentials: ServerConnection?
+    /// 자격증명 수집이 끝났을 때 실행할 동작 (새 연결 또는 재연결).
+    private var pendingCredentialAction: ((ResolvedCredentials) -> Void)?
     var editingConnection: ServerConnection?
     var selectedConnectionID: ServerConnection.ID?
     var sidebarTab: SidebarTab = .servers
@@ -49,17 +51,31 @@ final class SessionCoordinator {
     }
 
     func connectToSaved(_ conn: ServerConnection) {
-        beginConnect(conn)
+        collectCredentials(for: conn) { [weak self] creds in
+            // 저장된 연결로의 접속이므로, 연결이 성공하면 입력받은 비밀번호를 keychain에 저장한다.
+            self?.startSession(conn, credentials: creds, persistCredentials: true)
+        }
+    }
+
+    /// 끊어진 세션을 같은 터미널 버퍼를 유지한 채 다시 연결한다.
+    func reconnect(_ session: SSHSession) {
+        guard session.state == .disconnected else { return }
+        guard sessions.contains(where: { $0.id == session.id }) else { return }
+        collectCredentials(for: session.connection) { [weak self] creds in
+            session.terminalView?.feed(byteArray: Array("\r\n\u{1b}[33m[재연결 중...]\u{1b}[0m\r\n".utf8)[...])
+            self?.launch(into: session, credentials: creds, persistCredentials: true)
+        }
     }
 
     /// 필요한 비밀번호(각 password-auth hop + 타깃)를 keychain에서 모으고,
-    /// 빠진 것이 있으면 순차 프롬프트한다. 전부 모이면 연결을 시작한다.
-    private func beginConnect(_ conn: ServerConnection) {
+    /// 빠진 것이 있으면 순차 프롬프트한다. 전부 모이면 onReady를 실행한다.
+    private func collectCredentials(for conn: ServerConnection, onReady: @escaping (ResolvedCredentials) -> Void) {
         // 이미 자격증명 수집/프롬프트가 진행 중이면 재진입을 무시한다.
         guard pendingConnectionForCredentials == nil else { return }
         collectedPasswords = [:]
         passwordQueue = []
         pendingConnectionForCredentials = conn
+        pendingCredentialAction = onReady
 
         var requests: [PasswordRequest] = []
         for hop in conn.jumpHosts where hop.authMethod == .password {
@@ -108,14 +124,15 @@ final class SessionCoordinator {
         collectedPasswords = [:]
         passwordRequest = nil
         pendingConnectionForCredentials = nil
+        pendingCredentialAction = nil
     }
 
     private func launchPending() {
-        guard let conn = pendingConnectionForCredentials else { return }
+        guard pendingConnectionForCredentials != nil, let action = pendingCredentialAction else { return }
         let creds = ResolvedCredentials(passwords: collectedPasswords)
         pendingConnectionForCredentials = nil
-        // 저장된 연결로의 접속이므로, 연결이 성공하면 입력받은 비밀번호를 keychain에 저장한다.
-        startSession(conn, credentials: creds, persistCredentials: true)
+        pendingCredentialAction = nil
+        action(creds)
     }
 
     private func accountFor(id: UUID, in conn: ServerConnection) -> String {
@@ -145,20 +162,30 @@ final class SessionCoordinator {
         }
         sessions.append(session)
         activeSessionID = session.id
+        launch(into: session, credentials: credentials, persistCredentials: persistCredentials)
+    }
 
+    /// 세션(신규 또는 재연결)에 대해 연결 → 모니터링/keepalive/SFTP를 순서대로 시작한다.
+    private func launch(into session: SSHSession, credentials: ResolvedCredentials, persistCredentials: Bool) {
         Task {
             do {
                 try await session.connect(credentials: credentials)
                 if persistCredentials {
                     for (id, password) in credentials.passwords {
-                        try? connectionStore.savePassword(password, account: accountFor(id: id, in: connection))
+                        try? connectionStore.savePassword(password, account: accountFor(id: id, in: session.connection))
                     }
                 }
                 session.startMonitoring()
+                session.startKeepalive()
                 do {
                     try await session.openSFTP()
                 } catch {
                     session.statusMessage = "연결됨 (SFTP 사용 불가)"
+                }
+                // 재연결: 터미널 뷰가 이미 붙어 있으면 셸도 바로 시작한다.
+                // (신규 세션은 TerminalViewWrapper가 뷰 생성 후 시작 — startShell은 중복 호출에 안전)
+                if session.terminalView != nil {
+                    try? await session.startShell()
                 }
             } catch {
                 session.statusMessage = "연결 실패: \(error.localizedDescription)"
@@ -174,11 +201,11 @@ final class SessionCoordinator {
         }
     }
 
+    /// 세션이 끝나도 탭을 즉시 제거하지 않는다 — 마지막 출력을 보존하고
+    /// 재연결 버튼을 제공한다. 리소스(클라이언트 체인·폴링 태스크)는 정리한다.
     func handleSessionEnded(sessionID: UUID) {
-        sessions.removeAll { $0.id == sessionID }
-        if activeSessionID == sessionID {
-            activeSessionID = sessions.first?.id
-        }
+        guard let session = sessions.first(where: { $0.id == sessionID }) else { return }
+        Task { await session.disconnect() }
     }
 
     func disconnectAll() async {
