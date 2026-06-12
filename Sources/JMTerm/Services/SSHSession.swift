@@ -389,8 +389,9 @@ final class SSHSession: Identifiable {
     private func markShellEnded(message: String) {
         isShellRunning = false
         isConnected = false
+        // keepalive 등이 먼저 끊김 처리했다면 더 구체적인 사유 메시지를 유지한다.
+        if state != .disconnected { statusMessage = message }
         state = .disconnected
-        statusMessage = message
         NotificationCenter.default.post(name: .sshSessionEnded, object: id)
     }
 

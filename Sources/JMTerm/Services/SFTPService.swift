@@ -117,15 +117,16 @@ final class SFTPService {
         if let attrs = try? await sftp.getAttributes(at: remotePath) {
             totalSize = Int64(attrs.size ?? 0)
         }
-        transferProgress = TransferProgress(
-            fileName: fileName, isUpload: false,
-            bytesTransferred: 0, totalBytes: totalSize
-        )
-
         // .part 임시 파일에 받고 완성된 뒤에만 최종 위치로 이동 —
         // 중간 실패 시 기존 로컬 파일이 잘린 채 파괴되지 않도록.
         let partURL = localURL.appendingPathExtension("part")
         let file = try await sftp.openFile(filePath: remotePath, flags: .read)
+        // progress는 openFile 성공 후에 설정 — open 실패 시 isTransferring이
+        // true로 남아 이후 전송이 전부 막히지 않도록.
+        transferProgress = TransferProgress(
+            fileName: fileName, isUpload: false,
+            bytesTransferred: 0, totalBytes: totalSize
+        )
         do {
             FileManager.default.createFile(atPath: partURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: partURL)
@@ -173,24 +174,19 @@ final class SFTPService {
         } else {
             totalSize = 0
         }
-        transferProgress = TransferProgress(
-            fileName: fileName, isUpload: true,
-            bytesTransferred: 0, totalBytes: totalSize
-        )
-
-        let localHandle: FileHandle
-        do {
-            localHandle = try FileHandle(forReadingFrom: localURL)
-        } catch {
-            transferProgress = nil
-            throw error
-        }
+        let localHandle = try FileHandle(forReadingFrom: localURL)
         defer { try? localHandle.close() }
 
         // 원격도 임시 이름에 올린 뒤 rename — 중간 실패 시 기존 원격 파일이
         // 잘린 채 남지 않도록.
         let partPath = remotePath + ".jmterm-part"
         let file = try await sftp.openFile(filePath: partPath, flags: [.write, .create, .truncate])
+        // progress는 openFile 성공 후에 설정 — open 실패 시 isTransferring이
+        // true로 남아 이후 전송이 전부 막히지 않도록.
+        transferProgress = TransferProgress(
+            fileName: fileName, isUpload: true,
+            bytesTransferred: 0, totalBytes: totalSize
+        )
         do {
             var offset: UInt64 = 0
             while true {
