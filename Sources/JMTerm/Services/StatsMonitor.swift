@@ -40,6 +40,10 @@ final class StatsMonitor {
     private var prevNet: (rx: UInt64, tx: UInt64, time: Date)?
 
     func start(client: SSHClient) {
+        stop()
+        // 재연결/다른 서버 연결 시 이전 카운터 기준점이 남아 있으면 안 된다.
+        prevCPU = nil
+        prevNet = nil
         let clientBox = UncheckedSendableBox(value: client)
 
         statsTask = Task { [weak self] in
@@ -67,7 +71,7 @@ final class StatsMonitor {
         statsTask = nil
     }
 
-    private func parseStats(_ output: String) {
+    func parseStats(_ output: String) {
         let lines = output.components(separatedBy: "\n")
         var newStats = ServerStats()
 
@@ -81,10 +85,11 @@ final class StatsMonitor {
                 if values.count >= 4 {
                     let idle = values[3]
                     let total = values.reduce(0, +)
-                    if let prev = prevCPU {
+                    // 서버 리부트 등으로 카운터가 거꾸로 가면 언더플로 — 기준점만 갱신.
+                    if let prev = prevCPU, total >= prev.total, idle >= prev.idle {
                         let totalDelta = total - prev.total
                         let idleDelta = idle - prev.idle
-                        if totalDelta > 0 {
+                        if totalDelta > 0, idleDelta <= totalDelta {
                             newStats.cpuUsage = Double(totalDelta - idleDelta) / Double(totalDelta) * 100
                         }
                     }

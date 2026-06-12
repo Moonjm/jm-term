@@ -38,6 +38,24 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(conn.keychainAccount, "user@host:22")
     }
 
+    // allowLegacyAlgorithms 키가 없는 기존 JSON은 false로 디코딩되어야 한다.
+    func testLegacyJSONDefaultsAllowLegacyAlgorithmsToFalse() throws {
+        let conn = ServerConnection(name: "srv", host: "1.2.3.4", port: 22, username: "u", authMethod: .password)
+        let data = try JSONEncoder().encode(conn)
+        var dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        dict.removeValue(forKey: "allowLegacyAlgorithms")
+        let legacy = try JSONSerialization.data(withJSONObject: dict)
+
+        let decoded = try JSONDecoder().decode(ServerConnection.self, from: legacy)
+        XCTAssertFalse(decoded.allowLegacyAlgorithms)
+
+        // 플래그가 켜진 연결은 라운드트립으로 보존된다.
+        var on = conn
+        on.allowLegacyAlgorithms = true
+        let roundTrip = try JSONDecoder().decode(ServerConnection.self, from: JSONEncoder().encode(on))
+        XCTAssertTrue(roundTrip.allowLegacyAlgorithms)
+    }
+
     // Draft <-> JumpHost 변환.
     func testDraftConversion() {
         let hop = JumpHost(host: "h", port: 2222, username: "u", authMethod: .publicKey(path: "/k"))

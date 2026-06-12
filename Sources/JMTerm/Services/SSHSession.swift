@@ -21,31 +21,37 @@ struct UncheckedSendableBox<T>: @unchecked Sendable {
 typealias HostKeyPromptHandler = @MainActor (HostKeyPromptType) async -> HostKeyPromptResult
 
 /// Thread-safe one-shot resolver for async result passing across isolation boundaries.
-private final class OnceResolver: Sendable {
-    private let state = ManagedCriticalState<(resolved: Bool, continuation: CheckedContinuation<Void, Error>?)>(
-        (resolved: false, continuation: nil)
+/// resolve()가 wait()보다 먼저 와도 결과를 보관했다가 즉시 반환한다.
+final class OnceResolver: Sendable {
+    private let state = ManagedCriticalState<(result: Result<Void, Error>?, continuation: CheckedContinuation<Void, Error>?)>(
+        (result: nil, continuation: nil)
     )
 
     func resolve(with result: Result<Void, Error>) {
-        state.withLock { s in
-            guard !s.resolved else { return }
-            s.resolved = true
-            s.continuation?.resume(with: result)
+        let continuation = state.withLock { s -> CheckedContinuation<Void, Error>? in
+            guard s.result == nil else { return nil }
+            s.result = result
+            let c = s.continuation
+            s.continuation = nil
+            return c
         }
+        continuation?.resume(with: result)
     }
 
     func wait() async throws {
         try await withCheckedThrowingContinuation { continuation in
-            state.withLock { s in
-                if s.resolved { return }
+            let stored = state.withLock { s -> Result<Void, Error>? in
+                if let result = s.result { return result }
                 s.continuation = continuation
+                return nil
             }
+            if let stored { continuation.resume(with: stored) }
         }
     }
 }
 
 /// Minimal lock-based critical state for Sendable conformance.
-private final class ManagedCriticalState<State>: @unchecked Sendable {
+final class ManagedCriticalState<State>: @unchecked Sendable {
     private var state: State
     private let lock = NSLock()
     init(_ state: State) { self.state = state }
