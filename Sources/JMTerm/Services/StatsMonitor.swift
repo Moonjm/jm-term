@@ -56,9 +56,12 @@ final class StatsMonitor {
                     awk 'NR>2{rx+=$2;tx+=$10}END{printf "NET %d %d\\n",rx,tx}' /proc/net/dev
                     """
                     let output = try await clientBox.value.executeCommand(cmd)
+                    // stop() 후 늦게 돌아온 응답이 다음 연결의 기준점을 오염시키지 않도록.
+                    if Task.isCancelled { return }
                     let text = String(buffer: output)
                     self?.parseStats(text)
                 } catch {
+                    if Task.isCancelled { return }
                     // 명령 실패 시 무시하고 다음 폴링 대기
                 }
                 try? await Task.sleep(for: .seconds(3))

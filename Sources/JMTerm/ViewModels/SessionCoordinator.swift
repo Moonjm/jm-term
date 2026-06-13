@@ -25,6 +25,10 @@ final class SessionCoordinator {
 
     var hasQueuedPrompts: Bool { !hostKeyQueue.isEmpty }
 
+    /// 이 coordinator가 속한 창. 창별 키 모니터가 다른 창의 이벤트를
+    /// 가로채지 않도록 스코프를 한정하는 데 쓴다.
+    weak var hostWindow: NSWindow?
+
     private var lastClickID: ServerConnection.ID?
     private var lastClickDate = Date.distantPast
 

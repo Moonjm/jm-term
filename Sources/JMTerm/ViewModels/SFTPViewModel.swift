@@ -80,15 +80,19 @@ final class SFTPViewModel {
     }
 
     func loadDirectory() async {
+        // 경로 스냅샷: await 중 경로가 바뀌면(연속 탐색, 숨김 토글 등 겹친 로드)
+        // 늦게 도착한 옛 디렉토리 결과가 현재 화면을 덮어쓰지 않도록 한다.
+        let path = session.currentPath
         isLoading = true
         errorMessage = nil
         do {
-            var loaded = try await session.sftpService.listDirectory(at: session.currentPath)
+            var loaded = try await session.sftpService.listDirectory(at: path)
+            guard session.currentPath == path else { return }
             if !showHiddenFiles {
                 loaded.removeAll { $0.name.hasPrefix(".") }
             }
-            if session.currentPath != "/" {
-                let parent = (session.currentPath as NSString).deletingLastPathComponent
+            if path != "/" {
+                let parent = (path as NSString).deletingLastPathComponent
                 let parentNode = FileNode(
                     name: "..",
                     path: parent.isEmpty ? "/" : parent,
@@ -101,6 +105,7 @@ final class SFTPViewModel {
             }
             items = loaded
         } catch {
+            guard session.currentPath == path else { return }
             errorMessage = error.localizedDescription
         }
         isLoading = false

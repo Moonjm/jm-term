@@ -40,6 +40,9 @@ final class SFTPService {
 
     private var sftpClient: SFTPClient?
     private var cancelRequested = false
+    /// @MainActor 재진입 가드: transferProgress는 첫 await 이후에야 설정되므로,
+    /// 그 사이 끼어든 두 번째 호출이 busy 검사를 통과하지 못하게 즉시 예약한다.
+    private var transferReserved = false
     nonisolated private static let chunkSize: UInt32 = 1024 * 1024 // 1MB chunks
 
     /// 진행 중인 전송을 다음 청크 경계에서 중단한다.
@@ -94,7 +97,7 @@ final class SFTPService {
         }
     }
 
-    var isTransferring: Bool { transferProgress != nil }
+    var isTransferring: Bool { transferReserved || transferProgress != nil }
 
     /// 원격 경로에 파일/디렉토리가 존재하는지 확인 (덮어쓰기 확인용).
     func fileExists(at path: String) async -> Bool {
@@ -110,6 +113,8 @@ final class SFTPService {
     func downloadFile(remotePath: String, localURL: URL) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
         guard !isTransferring else { throw SFTPTransferError.busy }
+        transferReserved = true
+        defer { transferReserved = false }
         cancelRequested = false
 
         let fileName = (remotePath as NSString).lastPathComponent
@@ -128,7 +133,14 @@ final class SFTPService {
             bytesTransferred: 0, totalBytes: totalSize
         )
         do {
-            FileManager.default.createFile(atPath: partURL.path, contents: nil)
+            // 이전에 남은 .part가 있으면 제거하고 생성 결과를 확인한다 —
+            // 생성 실패를 무시하면 stale .part의 뒷부분이 섞인 채 완성될 수 있다.
+            if FileManager.default.fileExists(atPath: partURL.path) {
+                try FileManager.default.removeItem(at: partURL)
+            }
+            guard FileManager.default.createFile(atPath: partURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
             let handle = try FileHandle(forWritingTo: partURL)
             do {
                 var offset: UInt64 = 0
@@ -164,6 +176,8 @@ final class SFTPService {
     func uploadFile(localURL: URL, remotePath: String) async throws {
         guard let sftp = sftpClient else { throw SSHSessionError.notConnected }
         guard !isTransferring else { throw SFTPTransferError.busy }
+        transferReserved = true
+        defer { transferReserved = false }
         cancelRequested = false
 
         let fileName = localURL.lastPathComponent
@@ -199,8 +213,10 @@ final class SFTPService {
             }
             try await file.close()
             // SFTP rename은 대상이 존재하면 실패하는 서버가 많아 기존 파일을 먼저 제거한다.
+            // remove 실패를 삼키면 removedExistingTarget이 거짓 양성이 되어
+            // catch의 .jmterm-part 정리를 건너뛰므로 에러를 그대로 전파한다.
             if (try? await sftp.getAttributes(at: remotePath)) != nil {
-                try? await sftp.remove(at: remotePath)
+                try await sftp.remove(at: remotePath)
                 removedExistingTarget = true
             }
             try await sftp.rename(at: partPath, to: remotePath)

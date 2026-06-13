@@ -394,12 +394,16 @@ final class SSHSession: Identifiable {
     /// 이전 세대 셸의 늦은 종료가 재연결된 세션을 끊김 처리하지 않도록 세대를 검사한다.
     private func markShellEnded(message: String, generation: Int) {
         guard generation == connectionGeneration else { return }
+        let wasDisconnected = state == .disconnected
         isShellRunning = false
         isConnected = false
         // keepalive 등이 먼저 끊김 처리했다면 더 구체적인 사유 메시지를 유지한다.
-        if state != .disconnected { statusMessage = message }
+        if !wasDisconnected { statusMessage = message }
         state = .disconnected
-        NotificationCenter.default.post(name: .sshSessionEnded, object: id)
+        // 종료 알림은 .disconnected로의 첫 전이에서만 — keepalive가 이미 보냈다면 중복 발행 방지.
+        if !wasDisconnected {
+            NotificationCenter.default.post(name: .sshSessionEnded, object: id)
+        }
     }
 
     func sendToShell(_ data: Data) {

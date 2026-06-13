@@ -126,6 +126,22 @@ enum SidebarTab {
     case files
 }
 
+/// SwiftUI 뷰가 속한 NSWindow를 알아내기 위한 헬퍼.
+private struct WindowAccessor: NSViewRepresentable {
+    var onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { [weak view] in onResolve(view?.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let window = nsView.window
+        DispatchQueue.main.async { onResolve(window) }
+    }
+}
+
 struct ContentView: View {
     @State private var coordinator: SessionCoordinator
     @State private var tabSwitchMonitor: Any?
@@ -144,6 +160,8 @@ struct ContentView: View {
             let flags = event.modifierFlags
                 .intersection(.deviceIndependentFlagsMask)
                 .subtracting(.capsLock)
+            // 로컬 모니터는 앱 전역이므로, 다른 창의 이벤트는 그 창의 모니터에 맡긴다.
+            guard event.window === MainActor.assumeIsolated({ coordinator.hostWindow }) else { return event }
             // 시트(다이얼로그)가 떠 있으면 포커스 이동 등 기본 동작에 맡긴다.
             guard !(event.window?.isSheet ?? false) else { return event }
 
@@ -345,6 +363,7 @@ struct ContentView: View {
             coordinator.sidebarTab = available ? .files : .servers
         }
         .focusedSceneValue(\.sessionCoordinator, coordinator)
+        .background(WindowAccessor { window in coordinator.hostWindow = window })
         .onAppear { installTabSwitchMonitor() }
         .onDisappear { removeTabSwitchMonitor() }
     }
