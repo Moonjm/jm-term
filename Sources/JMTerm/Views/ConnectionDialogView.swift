@@ -11,6 +11,7 @@ struct ConnectionDialogView: View {
 
     /// quickConnect 모드에서 "새 서버 추가..."로 폼으로 전환할 수 있도록 로컬 상태로 유지.
     @State private var showingForm: Bool
+    private let mode: ConnectionDialogMode
 
     @State private var name = ""
     @State private var host = ""
@@ -29,6 +30,7 @@ struct ConnectionDialogView: View {
         onConnectSaved: @escaping (ServerConnection) -> Void = { _ in }
     ) {
         self.connectionStore = connectionStore
+        self.mode = mode
         self.onConnect = onConnect
         self.onConnectSaved = onConnectSaved
         _showingForm = State(initialValue: mode == .newServer)
@@ -50,8 +52,24 @@ struct ConnectionDialogView: View {
 
     @ViewBuilder
     private var newServerForm: some View {
-        Text("새 SSH 연결")
-            .font(.headline)
+        HStack {
+            // quickConnect 목록에서 넘어온 경우엔 되돌아갈 길을 제공한다.
+            if mode == .quickConnect {
+                Button(action: { showingForm = false }) {
+                    Label("목록으로", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+            }
+            Spacer()
+            Text("새 SSH 연결")
+                .font(.headline)
+            Spacer()
+            if mode == .quickConnect {
+                // 제목을 가운데 정렬하기 위한 균형추
+                Label("목록으로", systemImage: "chevron.left")
+                    .hidden()
+            }
+        }
 
         ConnectionFormView(
             name: $name, host: $host, port: $port,
@@ -80,21 +98,28 @@ struct ConnectionDialogView: View {
         Text("서버에 연결")
             .font(.headline)
 
-        ScrollView {
-            VStack(spacing: 2) {
-                ForEach(connectionStore.connections) { conn in
-                    Button {
-                        onConnectSaved(conn)
-                        dismiss()
-                    } label: {
-                        SavedConnectionRow(connection: conn)
+        if connectionStore.connections.isEmpty {
+            // 시트가 떠 있는 동안 다른 창에서 마지막 서버를 지운 경우
+            Text("저장된 서버가 없습니다")
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 12)
+        } else {
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(connectionStore.connections) { conn in
+                        Button {
+                            onConnectSaved(conn)
+                            dismiss()
+                        } label: {
+                            SavedConnectionRow(connection: conn)
+                        }
+                        .buttonStyle(.plain)
+                        .help("클릭하면 바로 연결합니다")
                     }
-                    .buttonStyle(.plain)
-                    .help("클릭하면 바로 연결합니다")
                 }
             }
+            .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 38 + 8, 300))
         }
-        .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 38 + 8, 300))
 
         HStack {
             Button("새 서버 추가...") { showingForm = true }

@@ -43,6 +43,9 @@ final class SessionCoordinator {
 
     /// ⌘T(새 탭): 저장된 서버가 있으면 목록에서 고르고, 없으면 새 서버 폼을 연다.
     func openQuickConnect() {
+        // 이미 떠 있는 다이얼로그(입력 중인 폼 포함)를 갈아치우지 않는다 —
+        // sheet(item:)은 모드가 바뀌면 내용을 새로 만들어 입력이 날아간다.
+        guard connectionDialogMode == nil else { return }
         connectionDialogMode = connectionStore.connections.isEmpty ? .newServer : .quickConnect
     }
 
