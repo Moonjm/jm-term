@@ -10,6 +10,7 @@ struct ConnectionFormView: View {
     @Binding var useKey: Bool
     @Binding var keyPath: String
     @Binding var jumpDrafts: [JumpHostDraft]
+    @Binding var allowLegacy: Bool
 
     @State private var testState: TestState = .idle
     @FocusState private var hostFocused: Bool
@@ -74,6 +75,7 @@ struct ConnectionFormView: View {
             switch e {
             case .connectionTimeout: return "연결 시간 초과 — 호스트·포트·방화벽을 확인하세요"
             case .hostKeyRejected: return "호스트 키 거부됨 — 신뢰할 수 없는 호스트 키"
+            case .hostKeyUnverified: return "미등록 호스트 — 비밀번호 테스트는 한 번 정식 연결해 호스트 키를 저장한 뒤 가능합니다"
             case .passwordRequired: return "비밀번호가 필요합니다"
             case .invalidKeyFormat, .unsupportedKeyType: return "키 형식 오류 — SSH 키 파일을 확인하세요"
             case .notConnected: return "연결할 수 없습니다"
@@ -130,6 +132,10 @@ struct ConnectionFormView: View {
 
                 // 이름: host/user에서 파생되므로 맨 아래·선택.
                 TextField("이름", text: $name, prompt: Text(autoNamePrompt))
+
+                Toggle("구형 서버 호환 (레거시 알고리즘 허용)", isOn: $allowLegacy)
+                    .toggleStyle(.checkbox)
+                    .help("SHA-1 기반 키 교환 등 오래된 암호화 알고리즘을 허용합니다. 최신 서버에 연결이 안 될 때만 켜세요 — 다운그레이드 공격에 취약해질 수 있습니다.")
             }
 
             GroupBox("점프 호스트 경유 (선택)") {
@@ -230,6 +236,7 @@ struct ConnectionFormView: View {
         .onChange(of: useKey) { testState = .idle }
         .onChange(of: keyPath) { testState = .idle }
         .onChange(of: jumpDrafts) { testState = .idle }
+        .onChange(of: allowLegacy) { testState = .idle }
         .onAppear {
             // 시트 표시 직후 핵심 필드(호스트)에 포커스.
             Task { @MainActor in
@@ -248,7 +255,8 @@ struct ConnectionFormView: View {
             port: Int(port) ?? 22,
             username: username,
             authMethod: authMethod,
-            jumpHosts: jumpDrafts.map { $0.toJumpHost() }
+            jumpHosts: jumpDrafts.map { $0.toJumpHost() },
+            allowLegacyAlgorithms: allowLegacy
         )
 
         var passwords: [UUID: String] = [:]

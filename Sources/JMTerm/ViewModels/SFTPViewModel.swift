@@ -10,19 +10,40 @@ final class SFTPViewModel {
 
     var items: [FileNode] = []
     var isLoading = false
+    /// 디렉토리 목록을 읽지 못했을 때만 사용 — 목록 영역 전체를 대체한다.
     var errorMessage: String?
+    /// 개별 작업(업로드·삭제 등) 실패 — 목록은 유지하고 배너로만 표시한다.
+    var operationError: String?
     var editingPath: String = ""
     var selectedID: FileNode.ID?
     var isDropTargeted = false
     var renamingNode: FileNode?
     var renamingName: String = ""
+    var showHiddenFiles: Bool {
+        didSet {
+            UserDefaults.standard.set(showHiddenFiles, forKey: Self.showHiddenFilesKey)
+            Task { await loadDirectory() }
+        }
+    }
 
+    private static let showHiddenFilesKey = "sftp.showHiddenFiles"
     private var trackedPath: String = ""
     private var lastClickID: FileNode.ID?
     private var lastClickDate = Date.distantPast
+    private var operationErrorDismissTask: Task<Void, Never>?
 
     init(session: SSHSession) {
         self.session = session
+        self.showHiddenFiles = UserDefaults.standard.object(forKey: Self.showHiddenFilesKey) as? Bool ?? true
+    }
+
+    func showOperationError(_ message: String) {
+        operationError = message
+        operationErrorDismissTask?.cancel()
+        operationErrorDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { self?.operationError = nil }
+        }
     }
 
     func handleFileClick(_ node: FileNode) {
@@ -42,7 +63,7 @@ final class SFTPViewModel {
         for _ in 0..<50 {
             if session.sftpService.isSFTPReady { break }
             try? await Task.sleep(for: .milliseconds(200))
-            if session.statusMessage.contains("실패") { return }
+            if session.state == .disconnected { return }
         }
         guard session.sftpService.isSFTPReady else { return }
         trackedPath = session.currentPath
@@ -59,12 +80,19 @@ final class SFTPViewModel {
     }
 
     func loadDirectory() async {
+        // 경로 스냅샷: await 중 경로가 바뀌면(연속 탐색, 숨김 토글 등 겹친 로드)
+        // 늦게 도착한 옛 디렉토리 결과가 현재 화면을 덮어쓰지 않도록 한다.
+        let path = session.currentPath
         isLoading = true
         errorMessage = nil
         do {
-            var loaded = try await session.sftpService.listDirectory(at: session.currentPath)
-            if session.currentPath != "/" {
-                let parent = (session.currentPath as NSString).deletingLastPathComponent
+            var loaded = try await session.sftpService.listDirectory(at: path)
+            guard session.currentPath == path else { return }
+            if !showHiddenFiles {
+                loaded.removeAll { $0.name.hasPrefix(".") }
+            }
+            if path != "/" {
+                let parent = (path as NSString).deletingLastPathComponent
                 let parentNode = FileNode(
                     name: "..",
                     path: parent.isEmpty ? "/" : parent,
@@ -77,6 +105,7 @@ final class SFTPViewModel {
             }
             items = loaded
         } catch {
+            guard session.currentPath == path else { return }
             errorMessage = error.localizedDescription
         }
         isLoading = false
@@ -106,7 +135,10 @@ final class SFTPViewModel {
             renamingNode = nil
             return
         }
-        guard !newName.isEmpty, !newName.contains("/") else { return }
+        guard !newName.isEmpty, !newName.contains("/") else {
+            showOperationError("이름에 '/'를 쓸 수 없고 비울 수 없습니다")
+            return
+        }
         let parentURL = URL(fileURLWithPath: node.path).deletingLastPathComponent()
         let newPath = parentURL.appendingPathComponent(newName).path
         Task {
@@ -115,7 +147,35 @@ final class SFTPViewModel {
                 renamingNode = nil
                 await loadDirectory()
             } catch {
-                errorMessage = "이름 변경 실패: \(error.localizedDescription)"
+                showOperationError("이름 변경 실패: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func createFolder() {
+        let alert = NSAlert()
+        alert.messageText = "새 폴더"
+        alert.informativeText = "생성할 폴더 이름을 입력하세요."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.placeholderString = "폴더 이름"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "만들기")
+        alert.addButton(withTitle: "취소")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !name.contains("/") else {
+            showOperationError("폴더 이름에 '/'를 쓸 수 없고 비울 수 없습니다")
+            return
+        }
+        let path = session.currentPath == "/" ? "/\(name)" : "\(session.currentPath)/\(name)"
+        Task {
+            do {
+                try await session.sftpService.createDirectory(at: path)
+                await loadDirectory()
+            } catch {
+                showOperationError("폴더 생성 실패: \(error.localizedDescription)")
             }
         }
     }
@@ -144,7 +204,7 @@ final class SFTPViewModel {
                 }
                 await loadDirectory()
             } catch {
-                errorMessage = "삭제 실패: \(error.localizedDescription)"
+                showOperationError("삭제 실패: \(error.localizedDescription)")
             }
         }
     }
@@ -185,13 +245,34 @@ final class SFTPViewModel {
     func handleDrop(_ providers: [NSItemProvider]) {
         Task { @MainActor in
             for provider in providers {
-                if let url = await loadFileURL(from: provider) {
-                    let remotePath = "\(session.currentPath)/\(url.lastPathComponent)"
-                    do {
-                        try await session.sftpService.uploadFile(localURL: url, remotePath: remotePath)
-                    } catch {
-                        errorMessage = error.localizedDescription
-                    }
+                guard let url = await loadFileURL(from: provider) else { continue }
+
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                    showOperationError("디렉토리 업로드는 지원되지 않습니다: \(url.lastPathComponent)")
+                    continue
+                }
+
+                let base = session.currentPath == "/" ? "" : session.currentPath
+                let remotePath = "\(base)/\(url.lastPathComponent)"
+
+                // 같은 이름의 원격 파일을 확인 없이 덮어쓰지 않는다.
+                if await session.sftpService.fileExists(at: remotePath) {
+                    let alert = NSAlert()
+                    alert.messageText = "'\(url.lastPathComponent)' 덮어쓰기"
+                    alert.informativeText = "같은 이름의 파일이 서버에 이미 있습니다. 덮어쓰시겠습니까?"
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "덮어쓰기")
+                    alert.addButton(withTitle: "건너뛰기")
+                    guard alert.runModal() == .alertFirstButtonReturn else { continue }
+                }
+
+                do {
+                    try await session.sftpService.uploadFile(localURL: url, remotePath: remotePath)
+                } catch SFTPTransferError.cancelled {
+                    // 사용자가 취소한 것 — 에러 배너를 띄우지 않는다.
+                } catch {
+                    showOperationError("업로드 실패: \(error.localizedDescription)")
                 }
             }
             await loadDirectory()
@@ -206,8 +287,10 @@ final class SFTPViewModel {
         Task {
             do {
                 try await session.sftpService.downloadFile(remotePath: node.path, localURL: url)
+            } catch SFTPTransferError.cancelled {
+                // 사용자가 취소한 것 — 에러 배너를 띄우지 않는다.
             } catch {
-                errorMessage = "다운로드 실패: \(error.localizedDescription)"
+                showOperationError("다운로드 실패: \(error.localizedDescription)")
             }
         }
     }

@@ -6,6 +6,8 @@ struct ConnectionDialogView: View {
     let connectionStore: ConnectionStore
     /// - Bool: 연결이 성공하면 비밀번호를 keychain에 저장할지(=연결 정보 저장 여부).
     var onConnect: (ServerConnection, ResolvedCredentials, Bool) -> Void
+    /// 저장된 서버를 선택했을 때 — keychain/프롬프트 흐름은 coordinator가 처리한다.
+    var onConnectSaved: (ServerConnection) -> Void = { _ in }
 
     @State private var name = ""
     @State private var host = ""
@@ -15,17 +17,49 @@ struct ConnectionDialogView: View {
     @State private var useKey = false
     @State private var keyPath = "~/.ssh/id_ed25519"
     @State private var jumpDrafts: [JumpHostDraft] = []
+    @State private var allowLegacy = false
 
     var body: some View {
         VStack(spacing: 16) {
             Text("새 SSH 연결")
                 .font(.headline)
 
+            // 저장된 서버 빠른 연결 — 폼을 다시 채울 필요 없이 바로 접속.
+            if !connectionStore.connections.isEmpty {
+                GroupBox("저장된 서버에 바로 연결") {
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(connectionStore.connections) { conn in
+                                Button {
+                                    onConnectSaved(conn)
+                                    dismiss()
+                                } label: {
+                                    SavedConnectionRow(connection: conn)
+                                }
+                                .buttonStyle(.plain)
+                                .help("클릭하면 바로 연결합니다")
+                            }
+                        }
+                    }
+                    .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 34, 136))
+                }
+
+                HStack {
+                    VStack { Divider() }
+                    Text("또는 새 서버")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                    VStack { Divider() }
+                }
+            }
+
             ConnectionFormView(
                 name: $name, host: $host, port: $port,
                 username: $username, password: $password,
                 useKey: $useKey, keyPath: $keyPath,
-                jumpDrafts: $jumpDrafts
+                jumpDrafts: $jumpDrafts,
+                allowLegacy: $allowLegacy
             )
 
             HStack {
@@ -51,7 +85,8 @@ struct ConnectionDialogView: View {
             port: Int(port) ?? 22,
             username: username,
             authMethod: authMethod,
-            jumpHosts: jumpDrafts.map { $0.toJumpHost() }
+            jumpHosts: jumpDrafts.map { $0.toJumpHost() },
+            allowLegacyAlgorithms: allowLegacy
         )
 
         var passwords: [UUID: String] = [:]
@@ -67,5 +102,41 @@ struct ConnectionDialogView: View {
 
         onConnect(connection, ResolvedCredentials(passwords: passwords), true)
         dismiss()
+    }
+}
+
+/// 다이얼로그용 저장 서버 행 — 호버 시 연결 아이콘으로 클릭 동작을 암시한다.
+private struct SavedConnectionRow: View {
+    let connection: ServerConnection
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "server.rack")
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(connection.name)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                Text(verbatim: "\(connection.username)@\(connection.host):\(connection.port)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if isHovered {
+                Image(systemName: "arrow.right.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .onHover { isHovered = $0 }
     }
 }
