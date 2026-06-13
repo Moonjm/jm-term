@@ -47,8 +47,9 @@ struct SessionCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("새 연결...") {
-                coordinator?.showConnectionDialog = true
+            // ⌘T = 새 탭: 저장된 서버 목록에서 골라 바로 연결 (없으면 새 서버 폼)
+            Button("새 탭...") {
+                coordinator?.openQuickConnect()
             }
             .keyboardShortcut("t", modifiers: .command)
             .disabled(coordinator == nil)
@@ -327,8 +328,8 @@ struct ContentView: View {
                 coordinator.cancelPassword()
             }
         }
-        .sheet(isPresented: $coordinator.showConnectionDialog) {
-            ConnectionDialogView(connectionStore: coordinator.connectionStore) { connection, credentials, persist in
+        .sheet(item: $coordinator.connectionDialogMode) { mode in
+            ConnectionDialogView(connectionStore: coordinator.connectionStore, mode: mode) { connection, credentials, persist in
                 coordinator.startSession(connection, credentials: credentials, persistCredentials: persist)
             } onConnectSaved: { connection in
                 // 다이얼로그 시트가 닫히는 중에 비밀번호 프롬프트 시트를 띄우면
@@ -375,10 +376,11 @@ struct ContentView: View {
                 Text("서버 목록")
                     .font(.headline)
                 Spacer()
-                Button(action: { coordinator.showConnectionDialog = true }) {
+                Button(action: { coordinator.connectionDialogMode = .newServer }) {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.plain)
+                .help("새 서버 추가")
             }
             .padding(10)
             .background(Color(white: 0.12))
@@ -401,7 +403,7 @@ struct ContentView: View {
                     Spacer()
                     Text("저장된 서버가 없습니다")
                         .foregroundStyle(.secondary)
-                    Button("새 연결 추가") { coordinator.showConnectionDialog = true }
+                    Button("새 연결 추가") { coordinator.connectionDialogMode = .newServer }
                         .padding(.top, 4)
                     Spacer()
                 }

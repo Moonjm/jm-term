@@ -9,7 +9,8 @@ final class SessionCoordinator {
 
     var sessions: [SSHSession] = []
     var activeSessionID: UUID?
-    var showConnectionDialog = false
+    /// 연결 다이얼로그 모드. nil이면 닫힘.
+    var connectionDialogMode: ConnectionDialogMode?
     var passwordRequest: PasswordRequest?
     private var passwordQueue: [PasswordRequest] = []
     private var collectedPasswords: [UUID: String] = [:]
@@ -38,6 +39,14 @@ final class SessionCoordinator {
 
     var activeSession: SSHSession? {
         sessions.first { $0.id == activeSessionID }
+    }
+
+    /// ⌘T(새 탭): 저장된 서버가 있으면 목록에서 고르고, 없으면 새 서버 폼을 연다.
+    func openQuickConnect() {
+        // 이미 떠 있는 다이얼로그(입력 중인 폼 포함)를 갈아치우지 않는다 —
+        // sheet(item:)은 모드가 바뀌면 내용을 새로 만들어 입력이 날아간다.
+        guard connectionDialogMode == nil else { return }
+        connectionDialogMode = connectionStore.connections.isEmpty ? .newServer : .quickConnect
     }
 
     /// 활성 탭을 앞/뒤로 순환 이동한다 (⌃⇥ / ⌃⇧⇥).
@@ -267,4 +276,14 @@ final class SessionCoordinator {
 struct PasswordRequest: Identifiable, Equatable {
     let id: UUID       // 타깃 connection.id 또는 JumpHost.id
     let label: String  // username@host:port
+}
+
+/// 연결 다이얼로그의 두 진입점을 구분한다.
+/// - newServer: 사이드바 + 버튼 — 새 서버 입력 폼만 표시
+/// - quickConnect: ⌘T 새 탭 — 저장된 서버 목록만 표시
+enum ConnectionDialogMode: String, Identifiable {
+    case newServer
+    case quickConnect
+
+    var id: String { rawValue }
 }

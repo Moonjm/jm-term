@@ -9,6 +9,10 @@ struct ConnectionDialogView: View {
     /// 저장된 서버를 선택했을 때 — keychain/프롬프트 흐름은 coordinator가 처리한다.
     var onConnectSaved: (ServerConnection) -> Void = { _ in }
 
+    /// quickConnect 모드에서 "새 서버 추가..."로 폼으로 전환할 수 있도록 로컬 상태로 유지.
+    @State private var showingForm: Bool
+    private let mode: ConnectionDialogMode
+
     @State private var name = ""
     @State private var host = ""
     @State private var port = "22"
@@ -19,62 +23,111 @@ struct ConnectionDialogView: View {
     @State private var jumpDrafts: [JumpHostDraft] = []
     @State private var allowLegacy = false
 
+    init(
+        connectionStore: ConnectionStore,
+        mode: ConnectionDialogMode = .newServer,
+        onConnect: @escaping (ServerConnection, ResolvedCredentials, Bool) -> Void,
+        onConnectSaved: @escaping (ServerConnection) -> Void = { _ in }
+    ) {
+        self.connectionStore = connectionStore
+        self.mode = mode
+        self.onConnect = onConnect
+        self.onConnectSaved = onConnectSaved
+        _showingForm = State(initialValue: mode == .newServer)
+    }
+
     var body: some View {
         VStack(spacing: 16) {
-            Text("새 SSH 연결")
-                .font(.headline)
-
-            // 저장된 서버 빠른 연결 — 폼을 다시 채울 필요 없이 바로 접속.
-            if !connectionStore.connections.isEmpty {
-                GroupBox("저장된 서버에 바로 연결") {
-                    ScrollView {
-                        VStack(spacing: 2) {
-                            ForEach(connectionStore.connections) { conn in
-                                Button {
-                                    onConnectSaved(conn)
-                                    dismiss()
-                                } label: {
-                                    SavedConnectionRow(connection: conn)
-                                }
-                                .buttonStyle(.plain)
-                                .help("클릭하면 바로 연결합니다")
-                            }
-                        }
-                    }
-                    .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 34, 136))
-                }
-
-                HStack {
-                    VStack { Divider() }
-                    Text("또는 새 서버")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                    VStack { Divider() }
-                }
-            }
-
-            ConnectionFormView(
-                name: $name, host: $host, port: $port,
-                username: $username, password: $password,
-                useKey: $useKey, keyPath: $keyPath,
-                jumpDrafts: $jumpDrafts,
-                allowLegacy: $allowLegacy
-            )
-
-            HStack {
-                Spacer()
-                Button("취소") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-
-                Button("연결") { connect() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(host.isEmpty || username.isEmpty)
+            if showingForm {
+                newServerForm
+            } else {
+                quickConnectList
             }
         }
         .padding(20)
         .frame(width: 400)
+    }
+
+    // MARK: - 새 서버 폼 (+ 버튼)
+
+    @ViewBuilder
+    private var newServerForm: some View {
+        HStack {
+            // quickConnect 목록에서 넘어온 경우엔 되돌아갈 길을 제공한다.
+            if mode == .quickConnect {
+                Button(action: { showingForm = false }) {
+                    Label("목록으로", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+            }
+            Spacer()
+            Text("새 SSH 연결")
+                .font(.headline)
+            Spacer()
+            if mode == .quickConnect {
+                // 제목을 가운데 정렬하기 위한 균형추
+                Label("목록으로", systemImage: "chevron.left")
+                    .hidden()
+            }
+        }
+
+        ConnectionFormView(
+            name: $name, host: $host, port: $port,
+            username: $username, password: $password,
+            useKey: $useKey, keyPath: $keyPath,
+            jumpDrafts: $jumpDrafts,
+            allowLegacy: $allowLegacy
+        )
+
+        HStack {
+            Spacer()
+            Button("취소") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+
+            Button("연결") { connect() }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(host.isEmpty || username.isEmpty)
+        }
+    }
+
+    // MARK: - 저장된 서버 목록 (⌘T 새 탭)
+
+    @ViewBuilder
+    private var quickConnectList: some View {
+        Text("서버에 연결")
+            .font(.headline)
+
+        if connectionStore.connections.isEmpty {
+            // 시트가 떠 있는 동안 다른 창에서 마지막 서버를 지운 경우
+            Text("저장된 서버가 없습니다")
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 12)
+        } else {
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(connectionStore.connections) { conn in
+                        Button {
+                            onConnectSaved(conn)
+                            dismiss()
+                        } label: {
+                            SavedConnectionRow(connection: conn)
+                        }
+                        .buttonStyle(.plain)
+                        .help("클릭하면 바로 연결합니다")
+                    }
+                }
+            }
+            .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 38 + 8, 300))
+        }
+
+        HStack {
+            Button("새 서버 추가...") { showingForm = true }
+                .buttonStyle(.borderless)
+            Spacer()
+            Button("취소") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+        }
     }
 
     private func connect() {

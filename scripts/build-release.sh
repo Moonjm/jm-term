@@ -38,6 +38,8 @@ codesign --force --deep --options runtime --timestamp \
 codesign --verify --deep --strict --verbose=1 "${APP_NAME}.app"
 
 mkdir -p "${DIST_DIR}"
+echo "Cleaning old zips in ${DIST_DIR}..."
+rm -f "${DIST_DIR}/${APP_NAME}"-*.zip
 ZIP_PATH="${DIST_DIR}/${APP_NAME}-${BUILD_TIMESTAMP}.zip"
 
 echo "Packaging for notarization..."
