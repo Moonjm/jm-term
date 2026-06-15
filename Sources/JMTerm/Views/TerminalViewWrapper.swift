@@ -116,6 +116,7 @@ struct TerminalViewWrapper: NSViewRepresentable {
         tv.optionAsMetaKey = true
         tv.allowMouseReporting = true
         tv.getTerminal().setCursorStyle(.steadyBlock)
+        tv.getTerminal().changeHistorySize(10000)   // 스크롤백 기본 500 → 10000줄
 
         // 커스텀 16색 ANSI 팔레트 (디렉토리 색상을 밝은 파랑으로 변경)
         let c = { (r: UInt16, g: UInt16, b: UInt16) in SwiftTerm.Color(red: r * 257, green: g * 257, blue: b * 257) }
