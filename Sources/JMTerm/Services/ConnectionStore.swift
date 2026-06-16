@@ -48,6 +48,20 @@ final class ConnectionStore {
         save()
     }
 
+    /// 드래그한 항목을 target 항목 자리로 이동시킨다. 실제로 이동했으면 true.
+    /// move(fromOffsets:toOffset:)는 destination을 제거 전 인덱스 기준으로 받으므로
+    /// 아래로 끌 때(from < to)는 +1 보정해 target '뒤'에, 위로 끌 때는 target '앞'에 놓는다.
+    @discardableResult
+    func move(draggedID: ServerConnection.ID, onto targetID: ServerConnection.ID) -> Bool {
+        guard let from = connections.firstIndex(where: { $0.id == draggedID }),
+              let toIndex = connections.firstIndex(where: { $0.id == targetID }),
+              from != toIndex else { return false }
+        let destination = from < toIndex ? toIndex + 1 : toIndex
+        connections.move(fromOffsets: IndexSet(integer: from), toOffset: destination)
+        save()
+        return true
+    }
+
     func update(_ connection: ServerConnection) {
         if let index = connections.firstIndex(where: { $0.id == connection.id }) {
             let old = connections[index]

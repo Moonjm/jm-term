@@ -378,16 +378,16 @@ struct ContentView: View {
 
     /// 드래그한 행(UUID 문자열)을 target 행 위치로 이동시킨다.
     private func handleDrop(_ items: [String], on target: ServerConnection) -> Bool {
+        resetDragState()
         guard let dragged = items.first,
               let draggedID = UUID(uuidString: dragged) else { return false }
-        let connections = coordinator.connectionStore.connections
-        guard let from = connections.firstIndex(where: { $0.id == draggedID }),
-              let toIndex = connections.firstIndex(where: { $0.id == target.id }),
-              from != toIndex else { return false }
-        // move(fromOffsets:toOffset:)는 아래로 이동 시 destination을 +1 보정해야 한다.
-        let destination = from < toIndex ? toIndex + 1 : toIndex
-        coordinator.connectionStore.move(from: IndexSet(integer: from), to: destination)
-        return true
+        return coordinator.connectionStore.move(draggedID: draggedID, onto: target.id)
+    }
+
+    /// 드래그 종료(성공/취소 무관) 시 시각 피드백 상태를 초기화한다.
+    private func resetDragState() {
+        draggingConnectionID = nil
+        dropTargetID = nil
     }
 
     @ViewBuilder
@@ -461,10 +461,13 @@ struct ContentView: View {
                                     .onAppear { draggingConnectionID = conn.id }
                             }
                             .dropDestination(for: String.self) { items, _ in
-                                draggingConnectionID = nil
-                                return handleDrop(items, on: conn)
+                                handleDrop(items, on: conn)
                             } isTargeted: { targeted in
-                                dropTargetID = targeted ? conn.id : (dropTargetID == conn.id ? nil : dropTargetID)
+                                if targeted {
+                                    dropTargetID = conn.id
+                                } else if dropTargetID == conn.id {
+                                    dropTargetID = nil
+                                }
                             }
                             .overlay(alignment: .top) {
                                 // 드롭 위치 표시선
@@ -477,6 +480,11 @@ struct ContentView: View {
                         }
                     }
                     .padding(6)
+                    // 행 사이 여백 등 빈 영역에 드롭해도 ghost 상태가 남지 않게 초기화한다.
+                    .dropDestination(for: String.self) { _, _ in
+                        resetDragState()
+                        return false
+                    }
                 }
             }
         }
