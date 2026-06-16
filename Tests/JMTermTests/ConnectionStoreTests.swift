@@ -68,6 +68,57 @@ final class ConnectionStoreTests: XCTestCase {
         XCTAssertEqual(try backupFiles().count, 1)
     }
 
+    // move(from:to:)는 순서를 바꾸고 디스크에 영속화한다.
+    func testMoveReordersAndPersists() throws {
+        let store = ConnectionStore(fileURL: fileURL)
+        store.add(ServerConnection(name: "a", host: "h", username: "u"))
+        store.add(ServerConnection(name: "b", host: "h", username: "u"))
+        store.add(ServerConnection(name: "c", host: "h", username: "u"))
+
+        // 첫 번째(a)를 맨 뒤로 이동 → b, c, a
+        store.move(from: IndexSet(integer: 0), to: 3)
+        XCTAssertEqual(store.connections.map(\.name), ["b", "c", "a"])
+
+        // 새 스토어로 다시 읽어도 순서가 유지되어야 한다.
+        let reloaded = ConnectionStore(fileURL: fileURL)
+        XCTAssertEqual(reloaded.connections.map(\.name), ["b", "c", "a"])
+    }
+
+    // move(draggedID:onto:)는 드래그 방향에 맞게 위치를 보정해 이동한다.
+    func testMoveDraggedOntoTarget() throws {
+        let store = ConnectionStore(fileURL: fileURL)
+        store.add(ServerConnection(name: "a", host: "h", username: "u"))
+        store.add(ServerConnection(name: "b", host: "h", username: "u"))
+        store.add(ServerConnection(name: "c", host: "h", username: "u"))
+        let ids = store.connections.map(\.id)   // a, b, c
+
+        // 아래로: a를 c 위에 드롭 → target '뒤'에 놓여 b, c, a
+        XCTAssertTrue(store.move(draggedID: ids[0], onto: ids[2]))
+        XCTAssertEqual(store.connections.map(\.name), ["b", "c", "a"])
+
+        // 위로: a(현재 맨 뒤)를 b 위에 드롭 → target '앞'에 놓여 b... → a, b, c
+        let now = store.connections.map(\.id)    // b, c, a
+        XCTAssertTrue(store.move(draggedID: now[2], onto: now[0]))
+        XCTAssertEqual(store.connections.map(\.name), ["a", "b", "c"])
+
+        // 재시작 후에도 순서 유지
+        let reloaded = ConnectionStore(fileURL: fileURL)
+        XCTAssertEqual(reloaded.connections.map(\.name), ["a", "b", "c"])
+    }
+
+    // 자기 자신/존재하지 않는 ID로의 이동은 no-op이며 false를 반환한다.
+    func testMoveDraggedNoOps() throws {
+        let store = ConnectionStore(fileURL: fileURL)
+        store.add(ServerConnection(name: "a", host: "h", username: "u"))
+        store.add(ServerConnection(name: "b", host: "h", username: "u"))
+        let ids = store.connections.map(\.id)
+
+        XCTAssertFalse(store.move(draggedID: ids[0], onto: ids[0]))      // 자기 자신
+        XCTAssertFalse(store.move(draggedID: UUID(), onto: ids[0]))      // 없는 드래그 원본
+        XCTAssertFalse(store.move(draggedID: ids[0], onto: UUID()))      // 없는 타깃
+        XCTAssertEqual(store.connections.map(\.name), ["a", "b"])
+    }
+
     // 일부 레코드만 깨진 경우: 정상 레코드는 복구하고 백업본을 남긴다.
     func testPartiallyCorruptFileRecoversValidRecords() throws {
         let good = ServerConnection(name: "good", host: "10.0.0.1", username: "u")

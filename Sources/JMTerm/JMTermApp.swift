@@ -146,6 +146,9 @@ private struct WindowAccessor: NSViewRepresentable {
 struct ContentView: View {
     @State private var coordinator: SessionCoordinator
     @State private var tabSwitchMonitor: Any?
+    /// 사이드바 드래그 재정렬 상태.
+    @State private var draggingConnectionID: ServerConnection.ID?
+    @State private var dropTargetID: ServerConnection.ID?
 
     init(connectionStore: ConnectionStore) {
         _coordinator = State(initialValue: SessionCoordinator(connectionStore: connectionStore))
@@ -369,6 +372,24 @@ struct ContentView: View {
         .onDisappear { removeTabSwitchMonitor() }
     }
 
+    private func backgroundColor(for conn: ServerConnection) -> Color {
+        coordinator.selectedConnectionID == conn.id ? Color.accentColor.opacity(0.2) : Color.clear
+    }
+
+    /// 드래그한 행(UUID 문자열)을 target 행 위치로 이동시킨다.
+    private func handleDrop(_ items: [String], on target: ServerConnection) -> Bool {
+        resetDragState()
+        guard let dragged = items.first,
+              let draggedID = UUID(uuidString: dragged) else { return false }
+        return coordinator.connectionStore.move(draggedID: draggedID, onto: target.id)
+    }
+
+    /// 드래그 종료(성공/취소 무관) 시 시각 피드백 상태를 초기화한다.
+    private func resetDragState() {
+        draggingConnectionID = nil
+        dropTargetID = nil
+    }
+
     @ViewBuilder
     private var serverListView: some View {
         VStack(spacing: 0) {
@@ -422,17 +443,48 @@ struct ContentView: View {
                             .padding(.vertical, 4)
                             .background(
                                 RoundedRectangle(cornerRadius: 5)
-                                    .fill(coordinator.selectedConnectionID == conn.id ? Color.accentColor.opacity(0.2) : Color.clear)
+                                    .fill(backgroundColor(for: conn))
                             )
+                            .opacity(draggingConnectionID == conn.id ? 0.35 : 1)
                             .contextMenu {
                                 Button("연결") { coordinator.connectToSaved(conn) }
                                 Button("수정") { coordinator.editingConnection = conn }
                                 Divider()
                                 Button("삭제", role: .destructive) { coordinator.deleteSaved(conn) }
                             }
+                            // 행 전체를 잡아 드래그해 순서를 바꾼다.
+                            .draggable(conn.id.uuidString) {
+                                ServerListRow(connection: conn)
+                                    .frame(width: 220)
+                                    .padding(6)
+                                    .background(Color(white: 0.18))
+                                    .onAppear { draggingConnectionID = conn.id }
+                            }
+                            .dropDestination(for: String.self) { items, _ in
+                                handleDrop(items, on: conn)
+                            } isTargeted: { targeted in
+                                if targeted {
+                                    dropTargetID = conn.id
+                                } else if dropTargetID == conn.id {
+                                    dropTargetID = nil
+                                }
+                            }
+                            .overlay(alignment: .top) {
+                                // 드롭 위치 표시선
+                                if dropTargetID == conn.id, draggingConnectionID != conn.id {
+                                    RoundedRectangle(cornerRadius: 1)
+                                        .fill(Color.accentColor)
+                                        .frame(height: 2)
+                                }
+                            }
                         }
                     }
                     .padding(6)
+                    // 행 사이 여백 등 빈 영역에 드롭해도 ghost 상태가 남지 않게 초기화한다.
+                    .dropDestination(for: String.self) { _, _ in
+                        resetDragState()
+                        return false
+                    }
                 }
             }
         }
