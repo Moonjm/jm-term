@@ -68,6 +68,22 @@ final class ConnectionStoreTests: XCTestCase {
         XCTAssertEqual(try backupFiles().count, 1)
     }
 
+    // move(from:to:)는 순서를 바꾸고 디스크에 영속화한다.
+    func testMoveReordersAndPersists() throws {
+        let store = ConnectionStore(fileURL: fileURL)
+        store.add(ServerConnection(name: "a", host: "h", username: "u"))
+        store.add(ServerConnection(name: "b", host: "h", username: "u"))
+        store.add(ServerConnection(name: "c", host: "h", username: "u"))
+
+        // 첫 번째(a)를 맨 뒤로 이동 → b, c, a
+        store.move(from: IndexSet(integer: 0), to: 3)
+        XCTAssertEqual(store.connections.map(\.name), ["b", "c", "a"])
+
+        // 새 스토어로 다시 읽어도 순서가 유지되어야 한다.
+        let reloaded = ConnectionStore(fileURL: fileURL)
+        XCTAssertEqual(reloaded.connections.map(\.name), ["b", "c", "a"])
+    }
+
     // 일부 레코드만 깨진 경우: 정상 레코드는 복구하고 백업본을 남긴다.
     func testPartiallyCorruptFileRecoversValidRecords() throws {
         let good = ServerConnection(name: "good", host: "10.0.0.1", username: "u")

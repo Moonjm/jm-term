@@ -146,6 +146,9 @@ private struct WindowAccessor: NSViewRepresentable {
 struct ContentView: View {
     @State private var coordinator: SessionCoordinator
     @State private var tabSwitchMonitor: Any?
+    /// 사이드바 드래그 재정렬 상태.
+    @State private var draggingConnectionID: ServerConnection.ID?
+    @State private var dropTargetID: ServerConnection.ID?
 
     init(connectionStore: ConnectionStore) {
         _coordinator = State(initialValue: SessionCoordinator(connectionStore: connectionStore))
@@ -369,6 +372,24 @@ struct ContentView: View {
         .onDisappear { removeTabSwitchMonitor() }
     }
 
+    private func backgroundColor(for conn: ServerConnection) -> Color {
+        coordinator.selectedConnectionID == conn.id ? Color.accentColor.opacity(0.2) : Color.clear
+    }
+
+    /// 드래그한 행(UUID 문자열)을 target 행 위치로 이동시킨다.
+    private func handleDrop(_ items: [String], on target: ServerConnection) -> Bool {
+        guard let dragged = items.first,
+              let draggedID = UUID(uuidString: dragged) else { return false }
+        let connections = coordinator.connectionStore.connections
+        guard let from = connections.firstIndex(where: { $0.id == draggedID }),
+              let toIndex = connections.firstIndex(where: { $0.id == target.id }),
+              from != toIndex else { return false }
+        // move(fromOffsets:toOffset:)는 아래로 이동 시 destination을 +1 보정해야 한다.
+        let destination = from < toIndex ? toIndex + 1 : toIndex
+        coordinator.connectionStore.move(from: IndexSet(integer: from), to: destination)
+        return true
+    }
+
     @ViewBuilder
     private var serverListView: some View {
         VStack(spacing: 0) {
@@ -422,13 +443,36 @@ struct ContentView: View {
                             .padding(.vertical, 4)
                             .background(
                                 RoundedRectangle(cornerRadius: 5)
-                                    .fill(coordinator.selectedConnectionID == conn.id ? Color.accentColor.opacity(0.2) : Color.clear)
+                                    .fill(backgroundColor(for: conn))
                             )
+                            .opacity(draggingConnectionID == conn.id ? 0.35 : 1)
                             .contextMenu {
                                 Button("연결") { coordinator.connectToSaved(conn) }
                                 Button("수정") { coordinator.editingConnection = conn }
                                 Divider()
                                 Button("삭제", role: .destructive) { coordinator.deleteSaved(conn) }
+                            }
+                            // 행 전체를 잡아 드래그해 순서를 바꾼다.
+                            .draggable(conn.id.uuidString) {
+                                ServerListRow(connection: conn)
+                                    .frame(width: 220)
+                                    .padding(6)
+                                    .background(Color(white: 0.18))
+                                    .onAppear { draggingConnectionID = conn.id }
+                            }
+                            .dropDestination(for: String.self) { items, _ in
+                                draggingConnectionID = nil
+                                return handleDrop(items, on: conn)
+                            } isTargeted: { targeted in
+                                dropTargetID = targeted ? conn.id : (dropTargetID == conn.id ? nil : dropTargetID)
+                            }
+                            .overlay(alignment: .top) {
+                                // 드롭 위치 표시선
+                                if dropTargetID == conn.id, draggingConnectionID != conn.id {
+                                    RoundedRectangle(cornerRadius: 1)
+                                        .fill(Color.accentColor)
+                                        .frame(height: 2)
+                                }
                             }
                         }
                     }

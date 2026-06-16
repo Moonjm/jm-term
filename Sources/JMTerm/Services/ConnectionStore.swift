@@ -42,6 +42,12 @@ final class ConnectionStore {
         save()
     }
 
+    /// 사이드바 드래그 재정렬. 순서는 connections.json 배열 순서로 영속화되어 재시작 후에도 유지된다.
+    func move(from source: IndexSet, to destination: Int) {
+        connections.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
     func update(_ connection: ServerConnection) {
         if let index = connections.firstIndex(where: { $0.id == connection.id }) {
             let old = connections[index]
