@@ -152,12 +152,16 @@ struct ConnectionDialogView: View {
         }
     }
 
-    /// 방향키로 선택 대상을 위/아래로 이동한다(끝에서 멈춤, 순환하지 않음).
+    /// 방향키로 선택 대상을 위/아래로 이동한다(끝에서 반대편으로 순환).
     private func moveSelection(by delta: Int) {
         let conns = connectionStore.connections
         guard !conns.isEmpty else { return }
-        let current = conns.firstIndex(where: { $0.id == selectedID }) ?? -1
-        let next = max(0, min(conns.count - 1, current + delta))
+        let next: Int
+        if let current = conns.firstIndex(where: { $0.id == selectedID }) {
+            next = (current + delta + conns.count) % conns.count
+        } else {
+            next = delta > 0 ? 0 : conns.count - 1
+        }
         selectedID = conns[next].id
     }
 

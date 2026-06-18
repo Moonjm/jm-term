@@ -502,13 +502,13 @@ struct ContentView: View {
         }
     }
 
-    /// 방향키로 서버 목록 선택을 위/아래 이동(끝에서 멈춤). 선택이 없으면 양 끝에서 시작.
+    /// 방향키로 서버 목록 선택을 위/아래 이동(끝에서 반대편으로 순환). 선택이 없으면 양 끝에서 시작.
     private func moveServerSelection(by delta: Int, proxy: ScrollViewProxy) {
         let conns = coordinator.connectionStore.connections
         guard !conns.isEmpty else { return }
         let next: Int
         if let cur = conns.firstIndex(where: { $0.id == coordinator.selectedConnectionID }) {
-            next = max(0, min(conns.count - 1, cur + delta))
+            next = (cur + delta + conns.count) % conns.count
         } else {
             next = delta > 0 ? 0 : conns.count - 1
         }
