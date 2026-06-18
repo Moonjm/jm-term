@@ -23,6 +23,10 @@ struct ConnectionDialogView: View {
     @State private var jumpDrafts: [JumpHostDraft] = []
     @State private var allowLegacy = false
 
+    /// 저장된 서버 목록에서 방향키로 이동 중인 대상.
+    @State private var selectedID: ServerConnection.ID?
+    @FocusState private var listFocused: Bool
+
     init(
         connectionStore: ConnectionStore,
         mode: ConnectionDialogMode = .newServer,
@@ -104,21 +108,39 @@ struct ConnectionDialogView: View {
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 12)
         } else {
-            ScrollView {
-                VStack(spacing: 2) {
-                    ForEach(connectionStore.connections) { conn in
-                        Button {
-                            onConnectSaved(conn)
-                            dismiss()
-                        } label: {
-                            SavedConnectionRow(connection: conn)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(connectionStore.connections) { conn in
+                            Button {
+                                onConnectSaved(conn)
+                                dismiss()
+                            } label: {
+                                SavedConnectionRow(
+                                    connection: conn,
+                                    isSelected: conn.id == selectedID
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("클릭하거나 방향키로 선택 후 Enter로 연결합니다")
+                            .id(conn.id)
                         }
-                        .buttonStyle(.plain)
-                        .help("클릭하면 바로 연결합니다")
                     }
                 }
+                .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 38 + 8, 300))
+                .onChange(of: selectedID) { _, newValue in
+                    if let newValue { proxy.scrollTo(newValue) }
+                }
             }
-            .frame(maxHeight: min(CGFloat(connectionStore.connections.count) * 38 + 8, 300))
+            .focusable()
+            .focused($listFocused)
+            .onKeyPress(.upArrow) { moveSelection(by: -1); return .handled }
+            .onKeyPress(.downArrow) { moveSelection(by: 1); return .handled }
+            .onKeyPress(.return) { connectSelected(); return .handled }
+            .onAppear {
+                if selectedID == nil { selectedID = connectionStore.connections.first?.id }
+                listFocused = true
+            }
         }
 
         HStack {
@@ -128,6 +150,24 @@ struct ConnectionDialogView: View {
             Button("취소") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }
+    }
+
+    /// 방향키로 선택 대상을 위/아래로 이동한다(끝에서 멈춤, 순환하지 않음).
+    private func moveSelection(by delta: Int) {
+        let conns = connectionStore.connections
+        guard !conns.isEmpty else { return }
+        let current = conns.firstIndex(where: { $0.id == selectedID }) ?? -1
+        let next = max(0, min(conns.count - 1, current + delta))
+        selectedID = conns[next].id
+    }
+
+    /// 현재 선택된 저장 서버로 연결한다(Enter).
+    private func connectSelected() {
+        guard let id = selectedID,
+              let conn = connectionStore.connections.first(where: { $0.id == id })
+        else { return }
+        onConnectSaved(conn)
+        dismiss()
     }
 
     private func connect() {
@@ -161,6 +201,8 @@ struct ConnectionDialogView: View {
 /// 다이얼로그용 저장 서버 행 — 호버 시 연결 아이콘으로 클릭 동작을 암시한다.
 private struct SavedConnectionRow: View {
     let connection: ServerConnection
+    /// 방향키로 선택된 행(키보드 포커스). 호버와 동일한 강조를 준다.
+    var isSelected: Bool = false
     @State private var isHovered = false
 
     var body: some View {
@@ -178,7 +220,7 @@ private struct SavedConnectionRow: View {
                     .lineLimit(1)
             }
             Spacer()
-            if isHovered {
+            if isHovered || isSelected {
                 Image(systemName: "arrow.right.circle.fill")
                     .foregroundStyle(Color.accentColor)
             }
@@ -188,7 +230,7 @@ private struct SavedConnectionRow: View {
         .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.clear)
+                .fill(isHovered || isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         )
         .onHover { isHovered = $0 }
     }

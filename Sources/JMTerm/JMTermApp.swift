@@ -149,6 +149,8 @@ struct ContentView: View {
     /// 사이드바 드래그 재정렬 상태.
     @State private var draggingConnectionID: ServerConnection.ID?
     @State private var dropTargetID: ServerConnection.ID?
+    /// 서버 목록 방향키 이동을 위한 포커스.
+    @FocusState private var serverListFocused: Bool
 
     init(connectionStore: ConnectionStore) {
         _coordinator = State(initialValue: SessionCoordinator(connectionStore: connectionStore))
@@ -429,11 +431,13 @@ struct ContentView: View {
                     Spacer()
                 }
             } else {
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 2) {
                         ForEach(coordinator.connectionStore.connections) { conn in
                             Button {
                                 coordinator.handleServerClick(conn)
+                                serverListFocused = true
                             } label: {
                                 ServerListRow(connection: conn)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -477,6 +481,7 @@ struct ContentView: View {
                                         .frame(height: 2)
                                 }
                             }
+                            .id(conn.id)
                         }
                     }
                     .padding(6)
@@ -486,8 +491,37 @@ struct ContentView: View {
                         return false
                     }
                 }
+                .focusable()
+                .focusEffectDisabled()
+                .focused($serverListFocused)
+                .onKeyPress(.upArrow) { moveServerSelection(by: -1, proxy: proxy); return .handled }
+                .onKeyPress(.downArrow) { moveServerSelection(by: 1, proxy: proxy); return .handled }
+                .onKeyPress(.return) { connectSelectedServer(); return .handled }
+                }
             }
         }
+    }
+
+    /// 방향키로 서버 목록 선택을 위/아래 이동(끝에서 멈춤). 선택이 없으면 양 끝에서 시작.
+    private func moveServerSelection(by delta: Int, proxy: ScrollViewProxy) {
+        let conns = coordinator.connectionStore.connections
+        guard !conns.isEmpty else { return }
+        let next: Int
+        if let cur = conns.firstIndex(where: { $0.id == coordinator.selectedConnectionID }) {
+            next = max(0, min(conns.count - 1, cur + delta))
+        } else {
+            next = delta > 0 ? 0 : conns.count - 1
+        }
+        coordinator.selectedConnectionID = conns[next].id
+        proxy.scrollTo(conns[next].id)
+    }
+
+    /// 현재 선택된 서버로 접속(Enter).
+    private func connectSelectedServer() {
+        guard let id = coordinator.selectedConnectionID,
+              let conn = coordinator.connectionStore.connections.first(where: { $0.id == id })
+        else { return }
+        coordinator.connectToSaved(conn)
     }
 }
 

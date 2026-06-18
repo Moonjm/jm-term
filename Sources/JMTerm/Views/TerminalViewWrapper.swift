@@ -185,6 +185,40 @@ struct TerminalViewWrapper: NSViewRepresentable {
                     return nil
                 }
 
+                // Option+Left → 단어 단위 뒤로 (ESC b = readline backward-word).
+                // zsh/bash 명령줄에서 단어 이동, vim normal 모드에서는 b(뒤 단어)로 동작.
+                if keyCode == 123 && flags.contains(.option) {
+                    MainActor.assumeIsolated {
+                        self.session?.sendToShell(Data([0x1b, 0x62]))   // ESC b
+                    }
+                    return nil
+                }
+
+                // Option+Right → 단어 단위 앞으로 (ESC f = readline forward-word).
+                if keyCode == 124 && flags.contains(.option) {
+                    MainActor.assumeIsolated {
+                        self.session?.sendToShell(Data([0x1b, 0x66]))   // ESC f
+                    }
+                    return nil
+                }
+
+                // Shift+Left → vim 단어 단위 뒤로. xterm modified-arrow(CSI 1;2 D)를 보내면
+                // vim 내장 <S-Left> 매핑(=b)이 normal/insert 모드 모두에서 단어 이동을 한다.
+                if keyCode == 123 && flags.contains(.shift) {
+                    MainActor.assumeIsolated {
+                        self.session?.sendToShell(Data([0x1b, 0x5b, 0x31, 0x3b, 0x32, 0x44]))   // ESC [ 1 ; 2 D
+                    }
+                    return nil
+                }
+
+                // Shift+Right → vim 단어 단위 앞으로 (CSI 1;2 C → vim 내장 <S-Right> = w).
+                if keyCode == 124 && flags.contains(.shift) {
+                    MainActor.assumeIsolated {
+                        self.session?.sendToShell(Data([0x1b, 0x5b, 0x31, 0x3b, 0x32, 0x43]))   // ESC [ 1 ; 2 C
+                    }
+                    return nil
+                }
+
                 return event
             }
         }
