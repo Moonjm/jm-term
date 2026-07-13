@@ -229,6 +229,16 @@ struct TerminalViewWrapper: NSViewRepresentable {
                 guard let self, let tv = self.terminalView else { return event }
                 let isFocused = MainActor.assumeIsolated { tv.window?.firstResponder === tv }
                 guard isFocused else { return event }
+                // 포인터가 터미널 뷰 위에 있을 때만 가로챈다.
+                // 사이드바 파일 목록 등 다른 영역 위에서는 이벤트를 통과시켜 해당 영역이 스크롤되게 한다.
+                let eventWindowNumber = event.windowNumber
+                let locationInWindow = event.locationInWindow
+                let isOverTerminal = MainActor.assumeIsolated {
+                    guard let window = tv.window, window.windowNumber == eventWindowNumber else { return false }
+                    let point = tv.convert(locationInWindow, from: nil)
+                    return tv.bounds.contains(point)
+                }
+                guard isOverTerminal else { return event }
                 let deltaY = event.deltaY
                 guard deltaY != 0 else { return event }
                 let isAlternate = MainActor.assumeIsolated {
