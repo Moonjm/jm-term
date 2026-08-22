@@ -209,6 +209,13 @@ final class SFTPViewModel {
         }
     }
 
+    /// 드래그 promise가 시작조차 못했다고 판단하기까지 기다리는 시간.
+    /// 앱 종료 시 AppKit은 CFPasteboardResolveAllPromisedData에서 메인 스레드를
+    /// 중첩 런루프에 가둔 채 promise 확정을 동기 대기한다. 그 상태에서는
+    /// @MainActor 작업이 영원히 스케줄되지 않으므로, 여기서 끊어주지 않으면
+    /// 앱이 무한히 멈춰 강제종료로만 끌 수 있다.
+    private static let dragPromiseStartTimeout: Duration = .seconds(3)
+
     func dragProvider(for node: FileNode) -> NSItemProvider {
         let provider = NSItemProvider()
         provider.suggestedName = node.name
@@ -217,13 +224,24 @@ final class SFTPViewModel {
         let sftpBox = UncheckedSendableBox(value: sftpService)
         let remotePath = node.path
         let fileName = node.name
+        let startTimeout = Self.dragPromiseStartTimeout
 
         provider.registerFileRepresentation(
             forTypeIdentifier: UTType.data.identifier,
             fileOptions: [],
             visibility: .all
         ) { completion in
+            // 워치독과 다운로드가 경쟁한다. 어느 쪽이 promise를 확정할지는
+            // DragPromiseState가 단일 잠금으로 결정하므로 completion은 정확히
+            // 한 번만 호출되고, 진 쪽은 아무 일도 하지 않는다.
+            let state = DragPromiseState()
+            let completionBox = UncheckedSendableBox(value: completion)
+
             Task { @MainActor in
+                // 워치독이 이미 실패로 확정했다면 시작하지 않는다 — 쓰이지 않을
+                // 파일을 받느라 대역폭을 쓰고, 전송 슬롯을 점유해 이후 전송이
+                // busy로 실패하게 만든다.
+                guard state.claimDownload() else { return }
                 let tempDir = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
                 try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -232,10 +250,18 @@ final class SFTPViewModel {
                 let tempURL = tempDir.appendingPathComponent(safeName)
                 do {
                     try await sftpBox.value.downloadFile(remotePath: remotePath, localURL: tempURL)
-                    completion(tempURL, true, nil)
+                    if state.claimCompletion() { completionBox.value(tempURL, true, nil) }
                 } catch {
-                    completion(nil, false, error)
+                    if state.claimCompletion() { completionBox.value(nil, false, error) }
                 }
+            }
+
+            // 워치독은 메인 액터를 타지 않는다 — 메인 스레드가 막혀도 동작해야 한다.
+            // 다운로드가 일단 시작됐다면 큰 파일이라도 끝까지 기다린다.
+            Task.detached {
+                try? await Task.sleep(for: startTimeout)
+                guard state.claimTimeout() else { return }
+                completionBox.value(nil, false, SFTPDragPromiseError.mainActorUnavailable)
             }
             return nil
         }
@@ -306,6 +332,61 @@ final class SFTPViewModel {
                     continuation.resume(returning: nil)
                 }
             }
+        }
+    }
+}
+
+/// 드래그 promise를 확정할 수 없을 때의 오류.
+enum SFTPDragPromiseError: LocalizedError {
+    /// 메인 액터가 막혀 있어 다운로드를 시작하지 못했다 (주로 앱 종료 중).
+    case mainActorUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .mainActorUnavailable:
+            return "앱이 종료 중이라 드래그한 파일을 내려받지 못했습니다."
+        }
+    }
+}
+
+/// 드래그 promise를 누가 확정할지 정하는 상태 기계.
+///
+/// 워치독(타임아웃)과 다운로드가 동시에 진행되므로, 확인과 변경이 서로 다른
+/// 잠금으로 나뉘면 그 틈에 둘 다 통과한다 — 이미 실패로 보고된 promise를 두고
+/// 원격 파일 전체를 내려받게 된다. 모든 전이를 단일 잠금 안에서 결정한다.
+final class DragPromiseState: Sendable {
+    private enum Phase {
+        case pending
+        case downloading
+        case finished
+    }
+
+    private let phase = ManagedCriticalState(Phase.pending)
+
+    /// 다운로드를 시작해도 되는지. 워치독이 이미 확정했으면 false.
+    func claimDownload() -> Bool {
+        phase.withLock { phase in
+            guard phase == .pending else { return false }
+            phase = .downloading
+            return true
+        }
+    }
+
+    /// 워치독이 promise를 실패로 확정해도 되는지. 다운로드가 시작됐으면 false.
+    func claimTimeout() -> Bool {
+        phase.withLock { phase in
+            guard phase == .pending else { return false }
+            phase = .finished
+            return true
+        }
+    }
+
+    /// 다운로드 결과를 보고해도 되는지. 두 번째 호출부터는 false.
+    func claimCompletion() -> Bool {
+        phase.withLock { phase in
+            guard phase == .downloading else { return false }
+            phase = .finished
+            return true
         }
     }
 }
