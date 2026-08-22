@@ -59,3 +59,52 @@ final class AppTerminationCleanupTests: XCTestCase {
         pasteboard.releaseGlobally()
     }
 }
+
+// 워치독과 다운로드는 동시에 진행되므로, 어느 한쪽이 promise를 확정하면
+// 다른 쪽은 반드시 아무 일도 하지 않아야 한다.
+final class DragPromiseStateTests: XCTestCase {
+    // Codex 리뷰 지적: 타임아웃으로 실패를 보고한 뒤에 다운로드가 시작되면
+    // 쓰이지 않을 파일을 받느라 대역폭을 쓰고 이후 전송이 busy로 막힌다.
+    func testDownloadDoesNotStartAfterTimeout() {
+        let state = DragPromiseState()
+        XCTAssertTrue(state.claimTimeout())
+        XCTAssertFalse(state.claimDownload(), "워치독이 확정한 뒤에 다운로드가 시작됐다")
+    }
+
+    // 다운로드가 시작된 뒤에는 워치독이 끼어들면 안 된다 — 큰 파일 전송이
+    // 3초를 넘겼다고 실패로 보고해 버리면 정상 드래그가 깨진다.
+    func testTimeoutDoesNotFireAfterDownloadStarts() {
+        let state = DragPromiseState()
+        XCTAssertTrue(state.claimDownload())
+        XCTAssertFalse(state.claimTimeout(), "다운로드 시작 후 워치독이 발동했다")
+    }
+
+    func testCompletionIsClaimedOnlyOnce() {
+        let state = DragPromiseState()
+        XCTAssertTrue(state.claimDownload())
+        XCTAssertTrue(state.claimCompletion())
+        XCTAssertFalse(state.claimCompletion(), "completion이 두 번 호출될 수 있다")
+    }
+
+    func testCompletionIsNotClaimedAfterTimeout() {
+        let state = DragPromiseState()
+        XCTAssertTrue(state.claimTimeout())
+        XCTAssertFalse(state.claimCompletion(), "타임아웃 후 다운로드 결과가 보고됐다")
+    }
+
+    // 두 경로가 실제로 동시에 달려들어도 정확히 하나만 이겨야 한다.
+    func testExactlyOneClaimWinsUnderContention() {
+        for _ in 0..<500 {
+            let state = DragPromiseState()
+            let wins = ManagedCriticalState(0)
+            let group = DispatchGroup()
+            for claim in [state.claimDownload, state.claimTimeout] {
+                DispatchQueue.global().async(group: group) {
+                    if claim() { wins.withLock { $0 += 1 } }
+                }
+            }
+            group.wait()
+            XCTAssertEqual(wins.withLock { $0 }, 1, "동시 경쟁에서 승자가 정확히 하나가 아니다")
+        }
+    }
+}

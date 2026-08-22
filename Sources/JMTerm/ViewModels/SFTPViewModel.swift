@@ -231,21 +231,17 @@ final class SFTPViewModel {
             fileOptions: [],
             visibility: .all
         ) { completion in
-            // completion은 정확히 한 번만 호출한다 — 워치독과 다운로드가 경쟁한다.
-            let state = ManagedCriticalState((finished: false, started: false))
-            let finish: @Sendable (URL?, Bool, Error?) -> Void = { url, coordinated, error in
-                let isFirst = state.withLock { s -> Bool in
-                    guard !s.finished else { return false }
-                    s.finished = true
-                    return true
-                }
-                guard isFirst else { return }
-                completion(url, coordinated, error)
-            }
+            // 워치독과 다운로드가 경쟁한다. 어느 쪽이 promise를 확정할지는
+            // DragPromiseState가 단일 잠금으로 결정하므로 completion은 정확히
+            // 한 번만 호출되고, 진 쪽은 아무 일도 하지 않는다.
+            let state = DragPromiseState()
+            let completionBox = UncheckedSendableBox(value: completion)
 
             Task { @MainActor in
-                // 메인 액터에 실제로 진입했음을 알린다 — 워치독은 이후 개입하지 않는다.
-                state.withLock { $0.started = true }
+                // 워치독이 이미 실패로 확정했다면 시작하지 않는다 — 쓰이지 않을
+                // 파일을 받느라 대역폭을 쓰고, 전송 슬롯을 점유해 이후 전송이
+                // busy로 실패하게 만든다.
+                guard state.claimDownload() else { return }
                 let tempDir = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
                 try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -254,9 +250,9 @@ final class SFTPViewModel {
                 let tempURL = tempDir.appendingPathComponent(safeName)
                 do {
                     try await sftpBox.value.downloadFile(remotePath: remotePath, localURL: tempURL)
-                    finish(tempURL, true, nil)
+                    if state.claimCompletion() { completionBox.value(tempURL, true, nil) }
                 } catch {
-                    finish(nil, false, error)
+                    if state.claimCompletion() { completionBox.value(nil, false, error) }
                 }
             }
 
@@ -264,10 +260,8 @@ final class SFTPViewModel {
             // 다운로드가 일단 시작됐다면 큰 파일이라도 끝까지 기다린다.
             Task.detached {
                 try? await Task.sleep(for: startTimeout)
-                let stalled = state.withLock { !$0.started }
-                if stalled {
-                    finish(nil, false, SFTPDragPromiseError.mainActorUnavailable)
-                }
+                guard state.claimTimeout() else { return }
+                completionBox.value(nil, false, SFTPDragPromiseError.mainActorUnavailable)
             }
             return nil
         }
@@ -351,6 +345,48 @@ enum SFTPDragPromiseError: LocalizedError {
         switch self {
         case .mainActorUnavailable:
             return "앱이 종료 중이라 드래그한 파일을 내려받지 못했습니다."
+        }
+    }
+}
+
+/// 드래그 promise를 누가 확정할지 정하는 상태 기계.
+///
+/// 워치독(타임아웃)과 다운로드가 동시에 진행되므로, 확인과 변경이 서로 다른
+/// 잠금으로 나뉘면 그 틈에 둘 다 통과한다 — 이미 실패로 보고된 promise를 두고
+/// 원격 파일 전체를 내려받게 된다. 모든 전이를 단일 잠금 안에서 결정한다.
+final class DragPromiseState: Sendable {
+    private enum Phase {
+        case pending
+        case downloading
+        case finished
+    }
+
+    private let phase = ManagedCriticalState(Phase.pending)
+
+    /// 다운로드를 시작해도 되는지. 워치독이 이미 확정했으면 false.
+    func claimDownload() -> Bool {
+        phase.withLock { phase in
+            guard phase == .pending else { return false }
+            phase = .downloading
+            return true
+        }
+    }
+
+    /// 워치독이 promise를 실패로 확정해도 되는지. 다운로드가 시작됐으면 false.
+    func claimTimeout() -> Bool {
+        phase.withLock { phase in
+            guard phase == .pending else { return false }
+            phase = .finished
+            return true
+        }
+    }
+
+    /// 다운로드 결과를 보고해도 되는지. 두 번째 호출부터는 false.
+    func claimCompletion() -> Bool {
+        phase.withLock { phase in
+            guard phase == .downloading else { return false }
+            phase = .finished
+            return true
         }
     }
 }
