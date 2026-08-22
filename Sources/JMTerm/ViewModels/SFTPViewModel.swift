@@ -209,6 +209,13 @@ final class SFTPViewModel {
         }
     }
 
+    /// 드래그 promise가 시작조차 못했다고 판단하기까지 기다리는 시간.
+    /// 앱 종료 시 AppKit은 CFPasteboardResolveAllPromisedData에서 메인 스레드를
+    /// 중첩 런루프에 가둔 채 promise 확정을 동기 대기한다. 그 상태에서는
+    /// @MainActor 작업이 영원히 스케줄되지 않으므로, 여기서 끊어주지 않으면
+    /// 앱이 무한히 멈춰 강제종료로만 끌 수 있다.
+    private static let dragPromiseStartTimeout: Duration = .seconds(3)
+
     func dragProvider(for node: FileNode) -> NSItemProvider {
         let provider = NSItemProvider()
         provider.suggestedName = node.name
@@ -217,13 +224,28 @@ final class SFTPViewModel {
         let sftpBox = UncheckedSendableBox(value: sftpService)
         let remotePath = node.path
         let fileName = node.name
+        let startTimeout = Self.dragPromiseStartTimeout
 
         provider.registerFileRepresentation(
             forTypeIdentifier: UTType.data.identifier,
             fileOptions: [],
             visibility: .all
         ) { completion in
+            // completion은 정확히 한 번만 호출한다 — 워치독과 다운로드가 경쟁한다.
+            let state = ManagedCriticalState((finished: false, started: false))
+            let finish: @Sendable (URL?, Bool, Error?) -> Void = { url, coordinated, error in
+                let isFirst = state.withLock { s -> Bool in
+                    guard !s.finished else { return false }
+                    s.finished = true
+                    return true
+                }
+                guard isFirst else { return }
+                completion(url, coordinated, error)
+            }
+
             Task { @MainActor in
+                // 메인 액터에 실제로 진입했음을 알린다 — 워치독은 이후 개입하지 않는다.
+                state.withLock { $0.started = true }
                 let tempDir = FileManager.default.temporaryDirectory
                     .appendingPathComponent(UUID().uuidString)
                 try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -232,9 +254,19 @@ final class SFTPViewModel {
                 let tempURL = tempDir.appendingPathComponent(safeName)
                 do {
                     try await sftpBox.value.downloadFile(remotePath: remotePath, localURL: tempURL)
-                    completion(tempURL, true, nil)
+                    finish(tempURL, true, nil)
                 } catch {
-                    completion(nil, false, error)
+                    finish(nil, false, error)
+                }
+            }
+
+            // 워치독은 메인 액터를 타지 않는다 — 메인 스레드가 막혀도 동작해야 한다.
+            // 다운로드가 일단 시작됐다면 큰 파일이라도 끝까지 기다린다.
+            Task.detached {
+                try? await Task.sleep(for: startTimeout)
+                let stalled = state.withLock { !$0.started }
+                if stalled {
+                    finish(nil, false, SFTPDragPromiseError.mainActorUnavailable)
                 }
             }
             return nil
@@ -306,6 +338,19 @@ final class SFTPViewModel {
                     continuation.resume(returning: nil)
                 }
             }
+        }
+    }
+}
+
+/// 드래그 promise를 확정할 수 없을 때의 오류.
+enum SFTPDragPromiseError: LocalizedError {
+    /// 메인 액터가 막혀 있어 다운로드를 시작하지 못했다 (주로 앱 종료 중).
+    case mainActorUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .mainActorUnavailable:
+            return "앱이 종료 중이라 드래그한 파일을 내려받지 못했습니다."
         }
     }
 }

@@ -5,6 +5,7 @@ import OSLog
 
 @main
 struct JMTermApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var connectionStore = ConnectionStore()
 
     init() {
