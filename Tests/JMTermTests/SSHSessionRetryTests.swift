@@ -22,10 +22,11 @@ final class SSHSessionRetryTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(ContinuousClock.now - start, .milliseconds(600))
     }
 
-    // 패킷이 조용히 버려지는 호스트(블랙홀 주소): 시도별 TCP timeout 이 정책값으로 짧게 걸리고, timeout 도 재시도된다.
+    // 패킷이 조용히 버려지는 호스트(accept 큐 포화 리스너): 시도별 TCP timeout 이 정책값으로 짧게 걸리고, timeout 도 재시도된다.
     func testTestConnectionRetriesTCPTimeoutPerAttempt() async throws {
+        let blackhole = try BlackholeListener()
         let policy = ConnectRetryPolicy(delays: [.milliseconds(200)], attemptTimeout: .milliseconds(300))
-        let conn = ServerConnection(name: "t", host: "10.255.255.1", port: 22, username: "u")
+        let conn = ServerConnection(name: "t", host: "127.0.0.1", port: blackhole.port, username: "u")
         let creds = ResolvedCredentials(passwords: [conn.id: "x"])
 
         let start = ContinuousClock.now
