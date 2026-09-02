@@ -215,7 +215,7 @@ final class SessionCoordinator {
                     try? await session.startShell()
                 }
             } catch {
-                session.statusMessage = "연결 실패: \(error.localizedDescription)"
+                session.statusMessage = "연결 실패: \(ConnectionErrorText.describe(error))"
             }
         }
     }
