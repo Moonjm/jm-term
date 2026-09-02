@@ -74,6 +74,8 @@ enum SessionState: Equatable, Sendable {
 final class SSHSession: Identifiable {
     let id = UUID()
     let connection: ServerConnection
+    /// 최초 TCP 연결 재시도 정책. 테스트에서 짧은 지연으로 바꿔 쓴다.
+    var retryPolicy: ConnectRetryPolicy = .default
     var isConnected = false
     var state: SessionState = .connecting
     var statusMessage = "연결 대기 중"
@@ -155,6 +157,29 @@ final class SSHSession: Identifiable {
         connection.allowLegacyAlgorithms ? .all : SSHAlgorithms()
     }
 
+    /// 최초 TCP 연결(직접·바스티온·테스트 연결)을 재시도 정책으로 감싼다.
+    /// `makeAuth`는 시도마다 호출된다: 캡처된 non-Sendable 값을 nonisolated connect 에 반복 전달하면 Swift 6 격리 오류.
+    private static func connectWithRetry(
+        isolation: isolated (any Actor)? = #isolation,
+        host: String, port: Int,
+        makeAuth: () throws -> SSHAuthenticationMethod,
+        hostKeyValidator: SSHHostKeyValidator,
+        algorithms: SSHAlgorithms,
+        policy: ConnectRetryPolicy,
+        onRetry: (Int) async -> Void = { _ in }
+    ) async throws -> sending SSHClient {
+        try await policy.run(onRetry: onRetry) {
+            try await SSHClient.connect(
+                host: host, port: port,
+                authenticationMethod: try makeAuth(),
+                hostKeyValidator: hostKeyValidator,
+                reconnect: .never,
+                algorithms: algorithms,
+                connectTimeout: policy.attemptTimeoutAmount
+            )
+        }
+    }
+
     private nonisolated static func makeJumpSettings(
         host: String, port: Int, authMethod: AuthMethod, username: String,
         password: String?, validator: SSHHostKeyValidator, algorithms: SSHAlgorithms
@@ -187,31 +212,15 @@ final class SSHSession: Identifiable {
     }
 
     private func connectDirect(password: String?) async throws {
-        let authMethod = try Self.resolveAuthMethod(connection, password: password)
-        let hostKeyValidator = buildHostKeyValidator(host: connection.host, port: connection.port)
-
-        var sshClient: SSHClient?
-        var lastError: Error?
-        for attempt in 1...3 {
-            do {
-                sshClient = try await SSHClient.connect(
-                    host: connection.host,
-                    port: connection.port,
-                    authenticationMethod: authMethod,
-                    hostKeyValidator: hostKeyValidator,
-                    reconnect: .never,
-                    algorithms: Self.algorithms(for: connection)
-                )
-                break
-            } catch {
-                lastError = error
-                if attempt < 3 {
-                    statusMessage = "연결 재시도 중... (\(attempt)/3)"
-                    try await Task.sleep(for: .milliseconds(500))
-                }
-            }
-        }
-        guard let sshClient else { throw lastError ?? SSHSessionError.notConnected }
+        let policy = retryPolicy
+        let sshClient = try await Self.connectWithRetry(
+            host: connection.host, port: connection.port,
+            makeAuth: { try Self.resolveAuthMethod(connection, password: password) },
+            hostKeyValidator: buildHostKeyValidator(host: connection.host, port: connection.port),
+            algorithms: Self.algorithms(for: connection),
+            policy: policy,
+            onRetry: { attempt in statusMessage = "연결 재시도 중... (\(attempt)/\(policy.attempts))" }
+        )
 
         self.client = sshClient
         isConnected = true
@@ -224,17 +233,18 @@ final class SSHSession: Identifiable {
         do {
             // 1) 최초 바스티온만 실제 TCP 연결.
             let first = connection.jumpHosts[0]
-            let firstAuth = try Self.resolveAuthMethod(
-                authMethod: first.authMethod, username: first.username, password: credentials.passwords[first.id]
-            )
+            let firstPassword = credentials.passwords[first.id]
             statusMessage = "바스티온 연결 중: \(first.host)"
-            let firstClient = try await SSHClient.connect(
-                host: first.host,
-                port: first.port,
-                authenticationMethod: firstAuth,
+            let policy = retryPolicy
+            let firstClient = try await Self.connectWithRetry(
+                host: first.host, port: first.port,
+                makeAuth: {
+                    try Self.resolveAuthMethod(authMethod: first.authMethod, username: first.username, password: firstPassword)
+                },
                 hostKeyValidator: buildHostKeyValidator(host: first.host, port: first.port),
-                reconnect: .never,
-                algorithms: Self.algorithms(for: connection)
+                algorithms: Self.algorithms(for: connection),
+                policy: policy,
+                onRetry: { attempt in statusMessage = "바스티온 연결 재시도 중... (\(attempt)/\(policy.attempts))" }
             )
             clients.append(firstClient)
 
@@ -580,12 +590,21 @@ final class SSHSession: Identifiable {
 
     // MARK: - Test Connection
 
+    /// 테스트 연결의 바깥 timeout 기본값: 재시도 정책의 최악 소요 시간 + SSH 핸드셰이크·인증·경유 여유.
+    /// 이보다 짧으면 TCP timeout 이 재시도 정책에 도달하기 전에 바깥 timeout 이 먼저 발동한다.
+    nonisolated static func defaultTestConnectionTimeout(for policy: ConnectRetryPolicy) -> Duration {
+        policy.worstCaseDuration + .seconds(10)
+    }
+
     /// 직접 또는 체인 연결을 시도하고 즉시 닫아 도달성을 검증한다. 프롬프트 없음.
+    /// `timeout` 이 nil 이면 `defaultTestConnectionTimeout(for:)` 를 쓴다.
     nonisolated static func testConnection(
         _ connection: ServerConnection,
         credentials: ResolvedCredentials,
-        timeout: Duration = .seconds(10)
+        timeout: Duration? = nil,
+        retryPolicy: ConnectRetryPolicy = .default
     ) async throws {
+        let timeout = timeout ?? defaultTestConnectionTimeout(for: retryPolicy)
         let connectionBox = UncheckedSendableBox(value: connection)
         let credsBox = UncheckedSendableBox(value: credentials)
         let resolver = OnceResolver()
@@ -595,27 +614,29 @@ final class SSHSession: Identifiable {
                 let conn = connectionBox.value
                 let creds = credsBox.value
                 if conn.jumpHosts.isEmpty {
-                    let auth = try resolveAuthMethod(conn, password: creds.passwords[conn.id])
-                    let client = try await SSHClient.connect(
+                    let client = try await connectWithRetry(
                         host: conn.host, port: conn.port,
-                        authenticationMethod: auth,
+                        makeAuth: { try resolveAuthMethod(conn, password: creds.passwords[conn.id]) },
                         hostKeyValidator: nonPromptingValidator(host: conn.host, port: conn.port, authMethod: conn.authMethod),
-                        reconnect: .never, algorithms: algorithms(for: conn)
+                        algorithms: algorithms(for: conn),
+                        policy: retryPolicy
                     )
                     try? await client.close()
                 } else {
                     var openClients: [SSHClient] = []
                     do {
                         let first = conn.jumpHosts[0]
-                        let firstAuth = try resolveAuthMethod(
-                            authMethod: first.authMethod, username: first.username,
-                            password: creds.passwords[first.id]
-                        )
-                        let firstClient = try await SSHClient.connect(
+                        let firstClient = try await connectWithRetry(
                             host: first.host, port: first.port,
-                            authenticationMethod: firstAuth,
+                            makeAuth: {
+                                try resolveAuthMethod(
+                                    authMethod: first.authMethod, username: first.username,
+                                    password: creds.passwords[first.id]
+                                )
+                            },
                             hostKeyValidator: nonPromptingValidator(host: first.host, port: first.port, authMethod: first.authMethod),
-                            reconnect: .never, algorithms: algorithms(for: conn)
+                            algorithms: algorithms(for: conn),
+                            policy: retryPolicy
                         )
                         openClients.append(firstClient)
                         var current = firstClient

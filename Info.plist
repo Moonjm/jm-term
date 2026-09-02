@@ -21,5 +21,7 @@
     <string>15.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>같은 네트워크(공유기)에 있는 서버에 SSH로 연결하려면 로컬 네트워크 접근 권한이 필요합니다.</string>
 </dict>
 </plist>
